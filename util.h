@@ -193,7 +193,6 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
 
     vector<Ciphertext> processed_labels = preprocess_label(inputs_Y, encryptor, evaluator, gal_keys);
 
-    cout << "test?\n";
 
 	for (int i = 0; i < (int) val_size; i++) {
         if (i == 0) {
