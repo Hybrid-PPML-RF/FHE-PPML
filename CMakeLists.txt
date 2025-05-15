@@ -45,4 +45,4 @@ include_directories( ${OPENMP_INCLUDES} )
 
 add_executable( ppml main.cpp )
 
-target_link_libraries(mps SEAL::seal ntl m gmp)
+target_link_libraries(ppml SEAL::seal ntl m gmp)

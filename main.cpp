@@ -1,4 +1,6 @@
 #include "seal/seal.h"
+#include "util.h"
+#include "global.h"
 #include "seal/util/iterator.h"
 #include <numeric>
 #include <stdio.h>
@@ -13,6 +15,9 @@ int main() {
 	int numcores = 8;
 	NTL::SetNumThreads(numcores);
 
+	for (auto &i : seed_glb) {
+		i = random_uint64();
+	}
 
 	int ring_dim = 32768;
 	int p = 65537;
@@ -63,8 +68,17 @@ int main() {
 	}
 	keygen.create_galois_keys(stepsfirst, gal_keys);
 
+	Plaintext pl_test;
+	vector<uint64_t> msg_test(poly_modulus_degree_glb);
+
 
 	///////////////////////////////////////////// prepare the one-hot encoding for datasets /////////////////////////////////////////////
+
+	vector<Ciphertext> inputs_X, inputs_Y;
+	sample_one_hot_encoding_inputs(inputs_X, inputs_Y, data_size_glb, attr_size_glb, value_size_glb, label_size_glb,
+								   batch_encoder, encryptor);
+
+	
 
 
 	///////////////////////// pre-process the dataset by recording all parition labels based on attr val ////////////////////////////////
