@@ -59,7 +59,7 @@ int main() {
 	BatchEncoder batch_encoder(seal_context);
 	Decryptor decryptor(seal_context, bfv_secret_key);
 
-	GaloisKeys gal_keys, gal_keys_expand, gal_keys_coeff, gal_keys_coeff_second;
+	GaloisKeys gal_keys, gal_keys_rot;
 
 	vector<int> stepsfirst = {0, 1};
 	for (int i = 0; i < log2(ring_dim/2); i++) {
@@ -67,6 +67,26 @@ int main() {
 		stepsfirst.push_back((1<<i));
 	}
 	keygen.create_galois_keys(stepsfirst, gal_keys);
+
+	// for preparing all threshlold values, rotation and addition
+	vector<int> steps_rot = {0, 1};
+	for (int i = 0; i < 2*value_size_glb; i++) {
+		steps_rot.push_back(i * data_size_glb);
+		// steps_rot.push_back(-i * data_size_glb);
+	}
+
+	int iter = 1;
+    while (iter < attr_size_glb) { // round it to a power of 2
+        iter *= 2;
+    }
+	for (int i = 0; i < iter; i++) {
+		if (i * data_size_glb * value_size_glb < poly_modulus_degree_glb / 2) {
+			steps_rot.push_back(-i * data_size_glb * value_size_glb);
+		}
+		// steps_rot.push_back(-i * data_size_glb);
+	}
+
+	keygen.create_galois_keys(steps_rot, gal_keys_rot);
 
 	Plaintext pl_test;
 	vector<uint64_t> msg_test(poly_modulus_degree_glb);
@@ -80,9 +100,49 @@ int main() {
 
 	
 
-
 	///////////////////////// pre-process the dataset by recording all parition labels based on attr val ////////////////////////////////
+	
+	// for (int i = 0; i < (int) poly_modulus_degree_glb; i++) {
+	// 	msg_test[i] = 0;
+	// }
+	// for (int i = 0; i < (int) 20; i++) {
+	// 	msg_test[i] = 1;
+	// }
+	// batch_encoder.encode(msg_test, pl_test);
+	// vector<Ciphertext> test_ct(1);
+	// encryptor.encrypt(pl_test, test_ct[0]);
 
+	chrono::high_resolution_clock::time_point time_start, time_end;
+    time_start = chrono::high_resolution_clock::now();
+
+	vector<Ciphertext> partitioned;
+
+	preprocess_all_threshold(inputs_X, inputs_Y, partitioned, batch_encoder, evaluator, encryptor, gal_keys_rot, relin_keys);
+
+	time_end = chrono::high_resolution_clock::now();
+	cout << "Preprocess time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
+
+	
+
+	// Ciphertext output = rotation_and_fill(test_ct[0], data_size_glb, evaluator, gal_keys_rot);
+
+	// // for (int ccc = 0; ccc < 4; ccc++) {
+	// decryptor.decrypt(output, pl_test);
+	// batch_encoder.decode(pl_test, msg_test);
+	// for (int i = 0; i < (int) 1000; i++) {
+	// 	cout << msg_test[i] << " ";
+	// }
+
+	// cout << endl;
+	// // }
+
+
+	
+
+	// preprocess_all_threshold(inputs_X, partitioned,);
+
+
+	
 
 	/////////////////////////////////////////// for each node, prepare the gini-index inputs ////////////////////////////////////////////
 
