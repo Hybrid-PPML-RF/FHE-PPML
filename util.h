@@ -21,7 +21,11 @@ Ciphertext rotation_and_fill(Ciphertext& input, int length, Evaluator& evaluator
     Ciphertext tmp;
     while (iter > 1) {
         int step = (int) (iter / 2) * length; // march by half each time
-        evaluator.rotate_rows(output, -step, rot_keys, tmp);
+        if (step > poly_modulus_degree_glb / 2) {
+            evaluator.rotate_rows(output, data_size_glb, rot_keys, tmp); // simulation step size... buggy
+        } else {
+            evaluator.rotate_rows(output, -step, rot_keys, tmp);
+        }
         evaluator.add_inplace(output, tmp);
 
         iter = iter / 2;
@@ -308,7 +312,10 @@ void update_selection_vector(vector<Ciphertext>& selection_vector, vector<Cipher
 
     for (int i = 0; i < 2; i++) {
         evaluator.multiply_plain(preprocessed_partitions[threshold_val_ind + 1 - i%2], extractor_pl, threshold_data);
-        evaluator.rotate_rows_inplace(threshold_data, start_ind, gal_keys);
+        if (start_ind > poly_modulus_degree_glb / 2) {
+            evaluator.rotate_columns_inplace(threshold_data, gal_keys);
+            evaluator.rotate_rows_inplace(threshold_data, start_ind - poly_modulus_degree_glb/2, gal_keys);
+        }
         threshold_data = rotation_and_fill(threshold_data, data_size_glb * value_size_glb, evaluator, gal_keys);
         evaluator.multiply(selection_vector[parent_sel_ind], threshold_data, selection_vector[child_sel_ind+i]);
         evaluator.relinearize_inplace(selection_vector[child_sel_ind+i], relin_keys);

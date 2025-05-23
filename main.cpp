@@ -16,13 +16,12 @@ int main() {
 		i = random_uint64();
 	}
 
-	int ring_dim = 32768;
 	int p = 65537;
 
 	EncryptionParameters bfv_params(scheme_type::bfv);
-	bfv_params.set_poly_modulus_degree(ring_dim);
+	bfv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
 
-	auto coeff_modulus = CoeffModulus::Create(ring_dim, {
+	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
 														60, 60, 60, 60, 60
 													});
 	bfv_params.set_coeff_modulus(coeff_modulus);
@@ -57,7 +56,7 @@ int main() {
 	GaloisKeys gal_keys, gal_keys_rot;
 
 	vector<int> stepsfirst = {0, 1};
-	for (int i = 0; i < log2(ring_dim/2); i++) {
+	for (int i = 0; i < log2(poly_modulus_degree_glb/2); i++) {
 		stepsfirst.push_back(-(1<<i));
 		stepsfirst.push_back((1<<i));
 	}
@@ -66,7 +65,11 @@ int main() {
 	// for preparing all threshlold values, rotation and addition
 	vector<int> steps_rot = {0, 1};
 	for (int i = 0; i < 2*value_size_glb; i++) {
-		steps_rot.push_back(i * data_size_glb);
+		if (i * data_size_glb < poly_modulus_degree_glb / 2) {
+			steps_rot.push_back(i * data_size_glb);
+		} else {
+			steps_rot.push_back(i * data_size_glb - poly_modulus_degree_glb / 2);
+		}
 	}
 	for (int i = data_size_glb; i > 0; i/=2) {
 		if (i % 2) {
@@ -81,10 +84,13 @@ int main() {
     }
 	for (int i = 0; i < iter; i++) {
 		if (i * data_size_glb * value_size_glb < poly_modulus_degree_glb / 2) {
+			cout << i * data_size_glb * value_size_glb << endl;
+			steps_rot.push_back(i * data_size_glb * value_size_glb);
 			steps_rot.push_back(-i * data_size_glb * value_size_glb);
-			steps_rot.push_back(data_size_glb * value_size_glb);
 		}
 	}
+
+	cout << "after" << endl;
 	
 
 	keygen.create_galois_keys(steps_rot, gal_keys_rot);
