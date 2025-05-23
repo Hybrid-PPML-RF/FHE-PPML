@@ -26,9 +26,7 @@ int main() {
 	bfv_params.set_poly_modulus_degree(ring_dim);
 
 	auto coeff_modulus = CoeffModulus::Create(ring_dim, {
-														60, 60, 60, 60,
-														60, 60, 60, 60,
-														60, 60, 60, 60
+														60, 60, 60, 60, 60
 													});
 	bfv_params.set_coeff_modulus(coeff_modulus);
 	bfv_params.set_plain_modulus(p);
@@ -72,7 +70,12 @@ int main() {
 	vector<int> steps_rot = {0, 1};
 	for (int i = 0; i < 2*value_size_glb; i++) {
 		steps_rot.push_back(i * data_size_glb);
-		// steps_rot.push_back(-i * data_size_glb);
+	}
+	for (int i = data_size_glb; i > 0; i/=2) {
+		if (i % 2) {
+			steps_rot.push_back(i-1);
+		}
+		steps_rot.push_back(i);
 	}
 
 	int iter = 1;
@@ -82,14 +85,18 @@ int main() {
 	for (int i = 0; i < iter; i++) {
 		if (i * data_size_glb * value_size_glb < poly_modulus_degree_glb / 2) {
 			steps_rot.push_back(-i * data_size_glb * value_size_glb);
+			steps_rot.push_back(data_size_glb * value_size_glb);
 		}
-		// steps_rot.push_back(-i * data_size_glb);
 	}
+	
 
 	keygen.create_galois_keys(steps_rot, gal_keys_rot);
 
-	Plaintext pl_test;
+	Plaintext pl_test, all_ones;
 	vector<uint64_t> msg_test(poly_modulus_degree_glb);
+
+	vector<uint64_t> allones(poly_modulus_degree_glb, 1);
+	batch_encoder.encode(allones, all_ones);
 
 
 	///////////////////////////////////////////// prepare the one-hot encoding for datasets /////////////////////////////////////////////
@@ -115,9 +122,10 @@ int main() {
 	chrono::high_resolution_clock::time_point time_start, time_end;
     time_start = chrono::high_resolution_clock::now();
 
-	vector<Ciphertext> partitioned;
+	vector<Ciphertext> preprocessed_partitions, preprocessed_partitioned_labels;
 
-	preprocess_all_threshold(inputs_X, inputs_Y, partitioned, batch_encoder, evaluator, encryptor, gal_keys_rot, relin_keys);
+	preprocess_all_threshold(inputs_X, inputs_Y, preprocessed_partitions, preprocessed_partitioned_labels, batch_encoder,
+							 evaluator, encryptor, gal_keys_rot, relin_keys);
 
 	time_end = chrono::high_resolution_clock::now();
 	cout << "Preprocess time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
@@ -135,19 +143,52 @@ int main() {
 
 	// cout << endl;
 	// // }
-
-
-	
-
-	// preprocess_all_threshold(inputs_X, partitioned,);
-
-
 	
 
 	/////////////////////////////////////////// for each node, prepare the gini-index inputs ////////////////////////////////////////////
+	vector<Ciphertext> selection_vector(pow(2, depth_glb));
+
+	// just fill in random selection vectors...
+	for (int i = 0; i < (int) selection_vector.size(); i++) {
+		encryptor.encrypt(pl_test, selection_vector[i]);
+	}
 
 
-	///////////////////////////////////////// update the selection vector based on MPC result ///////////////////////////////////////////
+	time_start = chrono::high_resolution_clock::now();
+	for (int d = 0; d < depth_glb; d++) { // for each level in the tree
+		for (int nd = 0 ; nd < pow(2, d); nd++) { // for each node in this level
+
+			int sel_ind = pow(2, d)-1 + nd;
+			
+			// based on previous parent partition, threshold attribute value, each #data_size chunk record 
+			vector<Ciphertext> partitions_for_node((int) preprocessed_partitions.size());
+			vector<Ciphertext> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
+			perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, 
+									   partition_labels_for_node, selection_vector[sel_ind], evaluator,
+									   relin_keys, gal_keys_rot);
+
+			cout << decryptor.invariant_noise_budget(partition_labels_for_node[0]) << endl;
+
+			// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
+			
+			// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
+
+
+
+
+			// ideally, different nodes should have different partition thresholds, but just for some simulation...
+			if (d != depth_glb-1) { // no need to update the leaf level
+				int threshold_attr_ind = 1, threshold_val_ind = 1; 
+				update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
+										batch_encoder, evaluator, relin_keys, gal_keys_rot);
+			}
+
+
+		}
+	}
+
+	time_end = chrono::high_resolution_clock::now();
+	cout << "Re-partition the data for all nodes time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
 
 
 	return 0;
