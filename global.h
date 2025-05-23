@@ -16,3 +16,5 @@ int label_size_glb = 3;
 prng_seed_type seed_glb;
 
 int depth_glb = 4; // decision tree depth
+
+int num_cores = 4;

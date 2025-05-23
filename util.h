@@ -227,26 +227,62 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
 // for "partition_labels_for_node", we also take the square to facilitate the MPC computation
 void perform_partition_for_node(vector<Ciphertext>& preprocessed_partitions, vector<Ciphertext>& preprocessed_partitioned_labels,
                                 vector<Ciphertext>& partitions_for_node, vector<Ciphertext>& partition_labels_for_node,
-                                Ciphertext& selection_vector, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys) {
+                                Ciphertext& selection_vector, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys,
+                                bool multi_thread = false) {
 
-    for (int i = 0; i < (int) preprocessed_partitions.size(); i++) {
+    if (multi_thread) {
+        NTL::SetNumThreads(num_cores);
+        int thread_chunk_size_1 = (int) preprocessed_partitions.size() / num_cores;
+        int thread_chunk_size_2 = (int) preprocessed_partitioned_labels.size() / num_cores;
+
+        cout << thread_chunk_size_1 << " " << thread_chunk_size_1 << endl;
+
+        NTL_EXEC_RANGE(num_cores, first, last);
+        for (int tt = first; tt < last; tt++) {
+            cout << tt << endl;
+            int end_1 = (tt == last-1) ? (int) preprocessed_partitions.size() : (tt+1) * thread_chunk_size_1;
+            for (int i = tt * thread_chunk_size_1; i < end_1; i++) {
+                evaluator.mod_switch_to_inplace(preprocessed_partitions[i], selection_vector.parms_id());
+                evaluator.multiply(preprocessed_partitions[i], selection_vector, partitions_for_node[i]);
+                evaluator.relinearize_inplace(partitions_for_node[i], relin_keys);
+                evaluator.mod_switch_to_next_inplace(partitions_for_node[i]);
+                partitions_for_node[i] = rotation_and_add(partitions_for_node[i], data_size_glb, 1, evaluator, gal_keys, 0);
+
+            }
+
+            int end_2 = (tt == last-1) ? (int) preprocessed_partitioned_labels.size() : (tt+1) * thread_chunk_size_2;
+            for (int i = tt * thread_chunk_size_2; i < end_2; i++) {
+                evaluator.mod_switch_to_inplace(preprocessed_partitioned_labels[i], selection_vector.parms_id());
+                evaluator.multiply(preprocessed_partitioned_labels[i], selection_vector, partition_labels_for_node[i]);
+                evaluator.relinearize_inplace(partition_labels_for_node[i], relin_keys);
+                partition_labels_for_node[i] = rotation_and_add(partition_labels_for_node[i], data_size_glb, 1, evaluator, gal_keys, 0);
+                
+                evaluator.mod_switch_to_next_inplace(partition_labels_for_node[i]);
+                evaluator.square_inplace(partition_labels_for_node[i]);
+                evaluator.relinearize_inplace(partition_labels_for_node[i], relin_keys);
+            }
+        }
+        NTL_EXEC_RANGE_END;
+    } else {
+        for (int i = 0; i < (int) preprocessed_partitions.size(); i++) {
         evaluator.mod_switch_to_inplace(preprocessed_partitions[i], selection_vector.parms_id());
         evaluator.multiply(preprocessed_partitions[i], selection_vector, partitions_for_node[i]);
         evaluator.relinearize_inplace(partitions_for_node[i], relin_keys);
         evaluator.mod_switch_to_next_inplace(partitions_for_node[i]);
         partitions_for_node[i] = rotation_and_add(partitions_for_node[i], data_size_glb, 1, evaluator, gal_keys, 0);
 
-    }
+        }
 
-    for (int i = 0; i < (int) preprocessed_partitioned_labels.size(); i++) {
-        evaluator.mod_switch_to_inplace(preprocessed_partitioned_labels[i], selection_vector.parms_id());
-        evaluator.multiply(preprocessed_partitioned_labels[i], selection_vector, partition_labels_for_node[i]);
-        evaluator.relinearize_inplace(partition_labels_for_node[i], relin_keys);
-        partition_labels_for_node[i] = rotation_and_add(partition_labels_for_node[i], data_size_glb, 1, evaluator, gal_keys, 0);
-        
-        evaluator.mod_switch_to_next_inplace(partition_labels_for_node[i]);
-        evaluator.square_inplace(partition_labels_for_node[i]);
-        evaluator.relinearize_inplace(partition_labels_for_node[i], relin_keys);
+        for (int i = 0; i < (int) preprocessed_partitioned_labels.size(); i++) {
+            evaluator.mod_switch_to_inplace(preprocessed_partitioned_labels[i], selection_vector.parms_id());
+            evaluator.multiply(preprocessed_partitioned_labels[i], selection_vector, partition_labels_for_node[i]);
+            evaluator.relinearize_inplace(partition_labels_for_node[i], relin_keys);
+            partition_labels_for_node[i] = rotation_and_add(partition_labels_for_node[i], data_size_glb, 1, evaluator, gal_keys, 0);
+            
+            evaluator.mod_switch_to_next_inplace(partition_labels_for_node[i]);
+            evaluator.square_inplace(partition_labels_for_node[i]);
+            evaluator.relinearize_inplace(partition_labels_for_node[i], relin_keys);
+        }
     }
 }
 

@@ -12,9 +12,6 @@ using namespace seal;
 using namespace std;
 
 int main() {
-	int numcores = 8;
-	NTL::SetNumThreads(numcores);
-
 	for (auto &i : seed_glb) {
 		i = random_uint64();
 	}
@@ -156,34 +153,69 @@ int main() {
 
 	time_start = chrono::high_resolution_clock::now();
 	for (int d = 0; d < depth_glb; d++) { // for each level in the tree
-		for (int nd = 0 ; nd < pow(2, d); nd++) { // for each node in this level
+		bool multi_thread = pow(2,d) >= 4;
 
-			int sel_ind = pow(2, d)-1 + nd;
-			
-			// based on previous parent partition, threshold attribute value, each #data_size chunk record 
-			vector<Ciphertext> partitions_for_node((int) preprocessed_partitions.size());
-			vector<Ciphertext> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
-			perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, 
-									   partition_labels_for_node, selection_vector[sel_ind], evaluator,
-									   relin_keys, gal_keys_rot);
+		if (multi_thread) {
+			NTL::SetNumThreads(num_cores);
+			int thread_chunk_size = pow(2,d) / num_cores;
+			NTL_EXEC_RANGE(num_cores, first, last);
+			for (int tt = first; tt < last; tt++) {
+				for (int nd = tt*thread_chunk_size ; nd < (tt+1)*thread_chunk_size; nd++) { // for each node in this level
 
-			cout << decryptor.invariant_noise_budget(partition_labels_for_node[0]) << endl;
+					int sel_ind = pow(2, d)-1 + nd;
+					
+					// based on previous parent partition, threshold attribute value, each #data_size chunk record 
+					vector<Ciphertext> partitions_for_node((int) preprocessed_partitions.size());
+					vector<Ciphertext> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
+					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, 
+											partition_labels_for_node, selection_vector[sel_ind], evaluator,
+											relin_keys, gal_keys_rot, !multi_thread);
 
-			// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
-			
-			// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
+					cout << decryptor.invariant_noise_budget(partition_labels_for_node[0]) << endl;
+
+					// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
+					
+					// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
 
 
 
 
-			// ideally, different nodes should have different partition thresholds, but just for some simulation...
-			if (d != depth_glb-1) { // no need to update the leaf level
-				int threshold_attr_ind = 1, threshold_val_ind = 1; 
-				update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
-										batch_encoder, evaluator, relin_keys, gal_keys_rot);
+					// ideally, different nodes should have different partition thresholds, but just for some simulation...
+					if (d != depth_glb-1) { // no need to update the leaf level
+						int threshold_attr_ind = 1, threshold_val_ind = 1; 
+						update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
+												batch_encoder, evaluator, relin_keys, gal_keys_rot);
+					}
+				}
 			}
+			NTL_EXEC_RANGE_END;
+		} else {
+			for (int nd = 0 ; nd < pow(2, d); nd++) { // for each node in this level
+				int sel_ind = pow(2, d)-1 + nd;
+				
+				// based on previous parent partition, threshold attribute value, each #data_size chunk record 
+				vector<Ciphertext> partitions_for_node((int) preprocessed_partitions.size());
+				vector<Ciphertext> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
+				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, 
+										partition_labels_for_node, selection_vector[sel_ind], evaluator,
+										relin_keys, gal_keys_rot, !multi_thread);
+
+				cout << decryptor.invariant_noise_budget(partition_labels_for_node[0]) << endl;
+
+				// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
+				
+				// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
 
 
+
+
+				// ideally, different nodes should have different partition thresholds, but just for some simulation...
+				if (d != depth_glb-1) { // no need to update the leaf level
+					int threshold_attr_ind = 1, threshold_val_ind = 1; 
+					update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
+											batch_encoder, evaluator, relin_keys, gal_keys_rot);
+				}
+			}
 		}
 	}
 
