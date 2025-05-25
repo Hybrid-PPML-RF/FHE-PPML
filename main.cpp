@@ -11,6 +11,17 @@
 using namespace seal;
 using namespace std;
 
+/**
+
+x: number of input_X used to encode the whole dataset
+y: number of input_Y used to encode the labels of whole dataset
+D: size of dataset
+L: total number of labels
+V: total number of values
+A: total number of attributes
+
+ */
+
 int main() {
 	for (auto &i : seed_glb) {
 		i = random_uint64();
@@ -84,13 +95,10 @@ int main() {
     }
 	for (int i = 0; i < iter; i++) {
 		if (i * data_size_glb * value_size_glb < poly_modulus_degree_glb / 2) {
-			cout << i * data_size_glb * value_size_glb << endl;
 			steps_rot.push_back(i * data_size_glb * value_size_glb);
 			steps_rot.push_back(-i * data_size_glb * value_size_glb);
 		}
 	}
-
-	cout << "after" << endl;
 	
 
 	keygen.create_galois_keys(steps_rot, gal_keys_rot);
@@ -125,7 +133,8 @@ int main() {
 	chrono::high_resolution_clock::time_point time_start, time_end;
     time_start = chrono::high_resolution_clock::now();
 
-	vector<Ciphertext> preprocessed_partitions, preprocessed_partitioned_labels;
+	vector<vector<Ciphertext>> preprocessed_partitions((int) inputs_X.size());
+	vector<vector<vector<Ciphertext>>> preprocessed_partitioned_labels((int) inputs_Y.size());
 
 	preprocess_all_threshold(inputs_X, inputs_Y, preprocessed_partitions, preprocessed_partitioned_labels, batch_encoder,
 							 evaluator, encryptor, gal_keys_rot, relin_keys);
@@ -156,9 +165,13 @@ int main() {
 		encryptor.encrypt(pl_test, selection_vector[i]);
 	}
 
+	// ideally, different nodes should have different partition thresholds, but just for some simulation...
+	int threshold_attr_ind = 1, threshold_val_ind = 1; 
+	update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, 0, 0,
+							batch_encoder, evaluator, relin_keys, gal_keys_rot);
 
 	time_start = chrono::high_resolution_clock::now();
-	for (int d = 0; d < depth_glb; d++) { // for each level in the tree
+	for (int d = 1; d < depth_glb; d++) { // for each level in the tree, except the root
 		bool multi_thread = pow(2,d) >= 4;
 
 		if (multi_thread) {
@@ -171,27 +184,27 @@ int main() {
 					int sel_ind = pow(2, d)-1 + nd;
 					
 					// based on previous parent partition, threshold attribute value, each #data_size chunk record 
-					vector<Ciphertext> partitions_for_node((int) preprocessed_partitions.size());
-					vector<Ciphertext> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
+					// this step is used just for multiplying the newly updated selection vector
+					// sum up each data_size chunk to a single value, and then square it
+					vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size(),
+																   vector<Ciphertext>((int) preprocessed_partitions[0].size()));
+					vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
 					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, 
 											partition_labels_for_node, selection_vector[sel_ind], evaluator,
 											relin_keys, gal_keys_rot, !multi_thread);
 
-					cout << decryptor.invariant_noise_budget(partition_labels_for_node[0]) << endl;
+					cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0]) << endl;
 
 					// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
-					
 					// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
 
-
-
-
-					// ideally, different nodes should have different partition thresholds, but just for some simulation...
+					
 					if (d != depth_glb-1) { // no need to update the leaf level
-						int threshold_attr_ind = 1, threshold_val_ind = 1; 
 						update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
 												batch_encoder, evaluator, relin_keys, gal_keys_rot);
+
 					}
+
 				}
 			}
 			NTL_EXEC_RANGE_END;
@@ -200,24 +213,18 @@ int main() {
 				int sel_ind = pow(2, d)-1 + nd;
 				
 				// based on previous parent partition, threshold attribute value, each #data_size chunk record 
-				vector<Ciphertext> partitions_for_node((int) preprocessed_partitions.size());
-				vector<Ciphertext> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
+				vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size());
+				vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
 				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, 
 										partition_labels_for_node, selection_vector[sel_ind], evaluator,
 										relin_keys, gal_keys_rot, !multi_thread);
 
-				cout << decryptor.invariant_noise_budget(partition_labels_for_node[0]) << endl;
+				cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0]) << endl;
 
 				// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
-				
 				// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
 
-
-
-
-				// ideally, different nodes should have different partition thresholds, but just for some simulation...
 				if (d != depth_glb-1) { // no need to update the leaf level
-					int threshold_attr_ind = 1, threshold_val_ind = 1; 
 					update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
 											batch_encoder, evaluator, relin_keys, gal_keys_rot);
 				}

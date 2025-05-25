@@ -2,7 +2,7 @@
 #include "seal/seal.h"
 using namespace seal;
 
-size_t poly_modulus_degree_glb = 16384;
+size_t poly_modulus_degree_glb = 32768;
 
 // (root, ring_dim) --> root^(2*ring_dim) % 65527 = 1
 // (4, 8), (2, 16), (255, 32), (141, 128), (431, 512), (21, 2048), (15, 8192), (3, 32768)

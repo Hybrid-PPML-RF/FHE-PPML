@@ -154,11 +154,14 @@ vector<Ciphertext> preprocess_label(vector<Ciphertext>& inputs_Y, Encryptor& enc
         pl_ext.data()[i] = 0;
     }
 
+    int label_per_ct = poly_modulus_degree_glb / (data_size);
+
     for (int i = 0; i < label_size; i++) {
-        for (int j = data_size * i; j < data_size * (i+1); j++) {
+        int ct_ind = i * data_size / poly_modulus_degree_glb;
+        for (int j = data_size * (i % label_per_ct); j < data_size * ((i%label_per_ct)+1); j++) {
             pl_ext.data()[j] = 1;
         }
-        evaluator.multiply_plain(inputs_Y[0], pl_ext, outputs[i]);
+        evaluator.multiply_plain(inputs_Y[ct_ind], pl_ext, outputs[i]);
     }
 
     for (int i = 0; i < (int) outputs.size(); i++) {
@@ -169,14 +172,20 @@ vector<Ciphertext> preprocess_label(vector<Ciphertext>& inputs_Y, Encryptor& enc
 }
 
 // arrange the parition by threshold_within_value --> left/right --> label_value, notice that all attributes are packed together
-void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& inputs_Y, vector<Ciphertext>& partitioned,
-                              vector<Ciphertext>& partitioned_labels,
+void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& inputs_Y, vector<vector<Ciphertext>>& partitioned,
+                              vector<vector<vector<Ciphertext>>>& partitioned_labels,
                               BatchEncoder& batch_encoder, Evaluator& evaluator, Encryptor& encryptor, GaloisKeys& gal_keys,
                               RelinKeys& relin_keys, int data_size = data_size_glb, int attr_size = attr_size_glb,
                               int val_size = value_size_glb, int label_size = label_size_glb) {
                     
-    partitioned.resize((val_size*2-1)); // there are that many possible threshold values for partitioning
-    partitioned_labels.resize(label_size * (val_size*2-1));
+    for (int i = 0; i < (int) partitioned.size(); i++) {
+        partitioned[i].resize((val_size*2-1)); // there are that many possible threshold values for partitioning
+    }
+    for (int i = 0; i < (int) partitioned.size(); i++) {
+        partitioned_labels[i].resize(label_size, vector<Ciphertext>(val_size*2-1));
+    }
+    // partitioned_labels.resize(label_size * (val_size*2-1)); // there are that many possible threshold values for partitioning
+    
     // notice that all attributes are packed together
     // i.e., each ciphertext encrypts "the indicators of datapoints for threshold \theta for all attributes"
 
@@ -189,38 +198,46 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
         if (i == 0) { // group all datapoints together
             for (int cnt = 0; cnt < (int) inputs_X.size(); cnt++) { 
                 tmp = inputs_X[cnt];
-                partitioned[0] = rotation_and_add(tmp, data_size * val_size, data_size, evaluator, gal_keys, 0);
+                partitioned[cnt][0] = rotation_and_add(tmp, data_size * val_size, data_size, evaluator, gal_keys, 0);
             }
         } else {
             for (int cnt = 0; cnt < (int) inputs_X.size(); cnt++) { 
                 tmp = inputs_X[cnt];
-                partitioned[(2*i-1)] = rotation_and_add(tmp, data_size * i, data_size, evaluator, gal_keys, 0); // left partition
+                partitioned[cnt][(2*i-1)] = rotation_and_add(tmp, data_size * i, data_size, evaluator, gal_keys, 0); // left partition
                 
                 tmp = inputs_X[cnt];
-                partitioned[2*i] = rotation_and_add(tmp, data_size * (val_size-i), data_size, evaluator, gal_keys, data_size * i); // right partition
-                evaluator.rotate_rows_inplace(partitioned[2*i], data_size * i, gal_keys);
+                partitioned[cnt][2*i] = rotation_and_add(tmp, data_size * (val_size-i), data_size, evaluator, gal_keys, data_size * i); // right partition
+                evaluator.rotate_rows_inplace(partitioned[cnt][2*i], data_size * i, gal_keys);
             }
         }
     }
 
+    cout << "   Input X preprocessed.\n";
+
     vector<Ciphertext> processed_labels = preprocess_label(inputs_Y, encryptor, evaluator, gal_keys);
 
+    cout << "   Input Y preprocessed.\n";
 
-	for (int i = 0; i < (int) val_size; i++) {
-        if (i == 0) {
-            for (int j = 0; j < label_size; j++) {
-                evaluator.multiply(partitioned[i], processed_labels[j], partitioned_labels[i + j]);
-                evaluator.relinearize_inplace(partitioned_labels[i + j], relin_keys);
-            }
-        } else {
-            for (int j = 0; j < label_size; j++) {
-                evaluator.multiply(partitioned[(2*i-1)], processed_labels[j], partitioned_labels[(2*i-1)*label_size + j]);
-                evaluator.relinearize_inplace(partitioned_labels[(2*i-1)*label_size + j], relin_keys);
-                evaluator.multiply(partitioned[2*i], processed_labels[j], partitioned_labels[2*i*label_size + j]);
-                evaluator.relinearize_inplace(partitioned_labels[2*i*label_size + j], relin_keys);
+
+    for (int cnt = 0; cnt < (int) partitioned.size(); cnt++) {
+        for (int i = 0; i < (int) val_size; i++) {
+            if (i == 0) {
+                for (int j = 0; j < label_size; j++) {
+                    evaluator.multiply(partitioned[cnt][i], processed_labels[j], partitioned_labels[cnt][j][i]);
+                    evaluator.relinearize_inplace(partitioned_labels[cnt][j][i], relin_keys);
+                }
+            } else {
+                for (int j = 0; j < label_size; j++) {
+                    evaluator.multiply(partitioned[cnt][(2*i-1)], processed_labels[j], partitioned_labels[cnt][j][(2*i-1)]);
+                    evaluator.relinearize_inplace(partitioned_labels[cnt][j][(2*i-1)], relin_keys);
+                    evaluator.multiply(partitioned[cnt][2*i], processed_labels[j], partitioned_labels[cnt][j][2*i]);
+                    evaluator.relinearize_inplace(partitioned_labels[cnt][j][2*i], relin_keys);
+                }
             }
         }
-	}
+    }
+
+    cout << "   Threshold value with labels pre-partitioned.\n";
 }
 
 // based on the selection vector, "partitions_for_node" records all selected datapoints for each threshold value
@@ -229,69 +246,86 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
 // the first entry of each chunk is |D|, where D is the dataset partitioned based on threshold, selection_vector 
 // (and label, if the ciphertext is "partition_labels_for_node")
 // for "partition_labels_for_node", we also take the square to facilitate the MPC computation
-void perform_partition_for_node(vector<Ciphertext>& preprocessed_partitions, vector<Ciphertext>& preprocessed_partitioned_labels,
-                                vector<Ciphertext>& partitions_for_node, vector<Ciphertext>& partition_labels_for_node,
+void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partitions,
+                                vector<vector<vector<Ciphertext>>>& preprocessed_partitioned_labels,
+                                vector<vector<Ciphertext>>& partitions_for_node,
+                                vector<vector<vector<Ciphertext>>>& partition_labels_for_node,
                                 Ciphertext& selection_vector, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys,
                                 bool multi_thread = false) {
 
+    for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
+        partitions_for_node[cnt].resize((int) preprocessed_partitions[cnt].size());
+    }
+
+    for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt ++) {
+        partition_labels_for_node[cnt].resize(label_size_glb, vector<Ciphertext>((int) preprocessed_partitioned_labels[0][0].size()));
+    }
+
     if (multi_thread) {
         NTL::SetNumThreads(num_cores);
-        int thread_chunk_size_1 = (int) preprocessed_partitions.size() / num_cores;
-        int thread_chunk_size_2 = (int) preprocessed_partitioned_labels.size() / num_cores;
-
-        cout << thread_chunk_size_1 << " " << thread_chunk_size_1 << endl;
+        int thread_chunk_size_1 = (int) preprocessed_partitions[0].size() / num_cores;
+        int thread_chunk_size_2 = (int) preprocessed_partitioned_labels[0][0].size() / num_cores;
 
         NTL_EXEC_RANGE(num_cores, first, last);
         for (int tt = first; tt < last; tt++) {
-            cout << tt << endl;
-            int end_1 = (tt == last-1) ? (int) preprocessed_partitions.size() : (tt+1) * thread_chunk_size_1;
-            for (int i = tt * thread_chunk_size_1; i < end_1; i++) {
-                evaluator.mod_switch_to_inplace(preprocessed_partitions[i], selection_vector.parms_id());
-                evaluator.multiply(preprocessed_partitions[i], selection_vector, partitions_for_node[i]);
-                evaluator.relinearize_inplace(partitions_for_node[i], relin_keys);
-                evaluator.mod_switch_to_next_inplace(partitions_for_node[i]);
-                partitions_for_node[i] = rotation_and_add(partitions_for_node[i], data_size_glb, 1, evaluator, gal_keys, 0);
-
+            int end_1 = (tt == last-1) ? (int) preprocessed_partitions[0].size() : (tt+1) * thread_chunk_size_1;
+            for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
+                for (int i = tt * thread_chunk_size_1; i < end_1; i++) {
+                    evaluator.mod_switch_to_inplace(preprocessed_partitions[cnt][i], selection_vector.parms_id());
+                    evaluator.multiply(preprocessed_partitions[cnt][i], selection_vector, partitions_for_node[cnt][i]);
+                    evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
+                    evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
+                    partitions_for_node[cnt][i] = rotation_and_add(partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
+                }
             }
 
-            int end_2 = (tt == last-1) ? (int) preprocessed_partitioned_labels.size() : (tt+1) * thread_chunk_size_2;
-            for (int i = tt * thread_chunk_size_2; i < end_2; i++) {
-                evaluator.mod_switch_to_inplace(preprocessed_partitioned_labels[i], selection_vector.parms_id());
-                evaluator.multiply(preprocessed_partitioned_labels[i], selection_vector, partition_labels_for_node[i]);
-                evaluator.relinearize_inplace(partition_labels_for_node[i], relin_keys);
-                partition_labels_for_node[i] = rotation_and_add(partition_labels_for_node[i], data_size_glb, 1, evaluator, gal_keys, 0);
-                
-                evaluator.mod_switch_to_next_inplace(partition_labels_for_node[i]);
-                evaluator.square_inplace(partition_labels_for_node[i]);
-                evaluator.relinearize_inplace(partition_labels_for_node[i], relin_keys);
+            int end_2 = (tt == last-1) ? (int) preprocessed_partitioned_labels[0][0].size() : (tt+1) * thread_chunk_size_2;
+            for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt++) {
+                for (int l = 0; l < label_size_glb; l++) {
+                    for (int i = tt * thread_chunk_size_2; i < end_2; i++) {
+                        evaluator.mod_switch_to_inplace(preprocessed_partitioned_labels[cnt][l][i], selection_vector.parms_id());
+                        evaluator.multiply(preprocessed_partitioned_labels[cnt][l][i], selection_vector, partition_labels_for_node[cnt][l][i]);
+                        evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
+                        partition_labels_for_node[cnt][l][i] = rotation_and_add(partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
+                        
+                        evaluator.mod_switch_to_next_inplace(partition_labels_for_node[cnt][l][i]);
+                        evaluator.square_inplace(partition_labels_for_node[cnt][l][i]);
+                        evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
+                    }
+                }
             }
         }
         NTL_EXEC_RANGE_END;
     } else {
-        for (int i = 0; i < (int) preprocessed_partitions.size(); i++) {
-        evaluator.mod_switch_to_inplace(preprocessed_partitions[i], selection_vector.parms_id());
-        evaluator.multiply(preprocessed_partitions[i], selection_vector, partitions_for_node[i]);
-        evaluator.relinearize_inplace(partitions_for_node[i], relin_keys);
-        evaluator.mod_switch_to_next_inplace(partitions_for_node[i]);
-        partitions_for_node[i] = rotation_and_add(partitions_for_node[i], data_size_glb, 1, evaluator, gal_keys, 0);
-
+        for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
+            for (int i = 0; i < (int) preprocessed_partitions[0].size(); i++) {
+                evaluator.mod_switch_to_inplace(preprocessed_partitions[cnt][i], selection_vector.parms_id());
+                evaluator.multiply(preprocessed_partitions[cnt][i], selection_vector, partitions_for_node[cnt][i]);
+                evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
+                evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
+                partitions_for_node[cnt][i] = rotation_and_add(partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
+            }
         }
 
-        for (int i = 0; i < (int) preprocessed_partitioned_labels.size(); i++) {
-            evaluator.mod_switch_to_inplace(preprocessed_partitioned_labels[i], selection_vector.parms_id());
-            evaluator.multiply(preprocessed_partitioned_labels[i], selection_vector, partition_labels_for_node[i]);
-            evaluator.relinearize_inplace(partition_labels_for_node[i], relin_keys);
-            partition_labels_for_node[i] = rotation_and_add(partition_labels_for_node[i], data_size_glb, 1, evaluator, gal_keys, 0);
-            
-            evaluator.mod_switch_to_next_inplace(partition_labels_for_node[i]);
-            evaluator.square_inplace(partition_labels_for_node[i]);
-            evaluator.relinearize_inplace(partition_labels_for_node[i], relin_keys);
+        for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt++) {
+            for (int l = 0; l < label_size_glb; l++) {
+                for (int i = 0; i < (int) preprocessed_partitioned_labels.size(); i++) {
+                    evaluator.mod_switch_to_inplace(preprocessed_partitioned_labels[cnt][l][i], selection_vector.parms_id());
+                    evaluator.multiply(preprocessed_partitioned_labels[cnt][l][i], selection_vector, partition_labels_for_node[cnt][l][i]);
+                    evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
+                    partition_labels_for_node[cnt][l][i] = rotation_and_add(partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
+                    
+                    evaluator.mod_switch_to_next_inplace(partition_labels_for_node[cnt][l][i]);
+                    evaluator.square_inplace(partition_labels_for_node[cnt][l][i]);
+                    evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
+                }
+            }
         }
     }
 }
 
 
-void update_selection_vector(vector<Ciphertext>& selection_vector, vector<Ciphertext>& preprocessed_partitions,
+void update_selection_vector(vector<Ciphertext>& selection_vector, vector<vector<Ciphertext>>& preprocessed_partitions,
                              int threshold_attr_ind, int threshold_val_ind, int cur_depth, int curr_node,
                              BatchEncoder& batch_encoder, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys) {
 
@@ -302,7 +336,9 @@ void update_selection_vector(vector<Ciphertext>& selection_vector, vector<Cipher
     Ciphertext threshold_data;
     vector<uint64_t> extractor_msg(poly_modulus_degree_glb, 0);
 
-    int start_ind = threshold_attr_ind * data_size_glb * value_size_glb; 
+    int attr_per_ct = poly_modulus_degree_glb / (label_size_glb * data_size_glb); // how many attr one ciphertext can pack
+
+    int start_ind = (threshold_attr_ind % attr_per_ct) * data_size_glb * value_size_glb; 
     int end_ind = start_ind + data_size_glb;
     for (int i = start_ind; i < end_ind; i++) {
         extractor_msg[i] = 1;
@@ -310,8 +346,11 @@ void update_selection_vector(vector<Ciphertext>& selection_vector, vector<Cipher
     Plaintext extractor_pl;
     batch_encoder.encode(extractor_msg, extractor_pl);
 
+
     for (int i = 0; i < 2; i++) {
-        evaluator.multiply_plain(preprocessed_partitions[threshold_val_ind + 1 - i%2], extractor_pl, threshold_data);
+        evaluator.multiply_plain(preprocessed_partitions[threshold_attr_ind / attr_per_ct][threshold_val_ind + 1 - i%2],
+                                 extractor_pl,
+                                 threshold_data);
         if (start_ind > poly_modulus_degree_glb / 2) {
             evaluator.rotate_columns_inplace(threshold_data, gal_keys);
             evaluator.rotate_rows_inplace(threshold_data, start_ind - poly_modulus_degree_glb/2, gal_keys);
