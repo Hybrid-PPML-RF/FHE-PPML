@@ -27,17 +27,13 @@ int main() {
 		i = random_uint64();
 	}
 
-	int p = 65537;
+	EncryptionParameters bfv_params(scheme_type::ckks);
+	bfv_params.set_poly_modulus_degree(poly_modulus_degree_glb*2);
 
-	EncryptionParameters bfv_params(scheme_type::bfv);
-	bfv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
-
-	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
+	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb*2, {
 														60, 60, 60, 60, 60
 													});
 	bfv_params.set_coeff_modulus(coeff_modulus);
-	bfv_params.set_plain_modulus(p);
-
 
 	prng_seed_type seed;
 	for (auto &i : seed) {
@@ -46,9 +42,7 @@ int main() {
 	auto rng = make_shared<Blake2xbPRNGFactory>(Blake2xbPRNGFactory(seed));
 	bfv_params.set_random_generator(rng);
 
-
-	SEALContext seal_context(bfv_params, true, sec_level_type::none);
-	primitive_root = seal_context.first_context_data()->plain_ntt_tables()->get_root();
+	SEALContext seal_context(bfv_params);
 
 	KeyGenerator keygen(seal_context);
 	SecretKey bfv_secret_key = keygen.secret_key();
@@ -61,8 +55,10 @@ int main() {
 
 	Encryptor encryptor(seal_context, bfv_public_key);
 	Evaluator evaluator(seal_context);
-	BatchEncoder batch_encoder(seal_context);
+	CKKSEncoder ckks_encoder(seal_context);
 	Decryptor decryptor(seal_context, bfv_secret_key);
+
+    size_t slot_count = ckks_encoder.slot_count();
 
 	GaloisKeys gal_keys, gal_keys_rot;
 
@@ -104,17 +100,19 @@ int main() {
 	keygen.create_galois_keys(steps_rot, gal_keys_rot);
 
 	Plaintext pl_test, all_ones;
-	vector<uint64_t> msg_test(poly_modulus_degree_glb);
+	vector<double> msg_test(poly_modulus_degree_glb);
 
-	vector<uint64_t> allones(poly_modulus_degree_glb, 1);
-	batch_encoder.encode(allones, all_ones);
+    
+
+	vector<double> allones(poly_modulus_degree_glb, 1);
+	ckks_encoder.encode(allones, scale, all_ones);
 
 
 	///////////////////////////////////////////// prepare the one-hot encoding for datasets /////////////////////////////////////////////
 
 	vector<Ciphertext> inputs_X, inputs_Y;
-	sample_one_hot_encoding_inputs(inputs_X, inputs_Y, data_size_glb, attr_size_glb, value_size_glb, label_size_glb,
-								   batch_encoder, encryptor);
+	sample_one_hot_encoding_inputs_ckks(inputs_X, inputs_Y, data_size_glb, attr_size_glb, value_size_glb, label_size_glb,
+								   ckks_encoder, encryptor);
 
 	
 
@@ -126,7 +124,7 @@ int main() {
 	// for (int i = 0; i < (int) 20; i++) {
 	// 	msg_test[i] = 1;
 	// }
-	// batch_encoder.encode(msg_test, pl_test);
+	// ckks_encoder.encode(msg_test, pl_test);
 	// vector<Ciphertext> test_ct(1);
 	// encryptor.encrypt(pl_test, test_ct[0]);
 
@@ -148,7 +146,7 @@ int main() {
 
 	// // for (int ccc = 0; ccc < 4; ccc++) {
 	// decryptor.decrypt(output, pl_test);
-	// batch_encoder.decode(pl_test, msg_test);
+	// ckks_encoder.decode(pl_test, msg_test);
 	// for (int i = 0; i < (int) 1000; i++) {
 	// 	cout << msg_test[i] << " ";
 	// }
@@ -167,10 +165,12 @@ int main() {
 
 	// ideally, different nodes should have different partition thresholds, but just for some simulation...
 	int threshold_attr_ind = 1, threshold_val_ind = 1; 
-	update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, 0, 0,
-							seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
 
 	time_start = chrono::high_resolution_clock::now();
+
+	update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, 0, 0,
+							seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
+
 	for (int d = 1; d < depth_glb; d++) { // for each level in the tree, except the root
 		bool multi_thread = pow(2,d) >= 4;
 
@@ -200,8 +200,8 @@ int main() {
 
 					
 					if (d != depth_glb-1) { // no need to update the leaf level
-						update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
-												seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
+						update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
+												seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
 
 						
 						cout << "sel: " << d << " " << decryptor.invariant_noise_budget(selection_vector[2*(pow(2, d)-1 + nd) + 1]) << endl;
@@ -227,8 +227,8 @@ int main() {
 				// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
 
 				if (d != depth_glb-1) { // no need to update the leaf level
-					update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
-											seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
+					update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
+											seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
 				}
 			}
 		}

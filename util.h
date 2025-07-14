@@ -10,7 +10,7 @@ using namespace std;
 using namespace seal;
 
 // for a length n vector, fill in into whole ciphertext
-Ciphertext rotation_and_fill(Ciphertext& input, int length, Evaluator& evaluator, GaloisKeys& rot_keys) {
+Ciphertext rotation_and_fill(SEALContext& context, Ciphertext& input, int length, Evaluator& evaluator, GaloisKeys& rot_keys) {
     Ciphertext output = input;
 
     int iter = 1;
@@ -21,10 +21,18 @@ Ciphertext rotation_and_fill(Ciphertext& input, int length, Evaluator& evaluator
     Ciphertext tmp;
     while (iter > 1) {
         int step = (int) (iter / 2) * length; // march by half each time
-        if (step > poly_modulus_degree_glb / 2) {
-            evaluator.rotate_rows(output, data_size_glb, rot_keys, tmp); // simulation step size... buggy
+        if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+            if (step > poly_modulus_degree_glb / 2) {
+                evaluator.rotate_vector(output, data_size_glb, rot_keys, tmp); // simulation step size... buggy
+            } else {
+                evaluator.rotate_vector(output, -step, rot_keys, tmp);
+            }
         } else {
-            evaluator.rotate_rows(output, -step, rot_keys, tmp);
+            if (step > poly_modulus_degree_glb / 2) {
+                evaluator.rotate_rows(output, data_size_glb, rot_keys, tmp); // simulation step size... buggy
+            } else {
+                evaluator.rotate_rows(output, -step, rot_keys, tmp);
+            }
         }
         evaluator.add_inplace(output, tmp);
 
@@ -35,8 +43,8 @@ Ciphertext rotation_and_fill(Ciphertext& input, int length, Evaluator& evaluator
 }
 
 // for a length n vector, sum all chunks into one
-Ciphertext rotation_and_add(Ciphertext& input, int length, int chunk_size, Evaluator& evaluator, GaloisKeys& rot_keys,
-                            int offset = 0) {
+Ciphertext rotation_and_add(SEALContext& context, Ciphertext& input, int length, int chunk_size, Evaluator& evaluator,
+                            GaloisKeys& rot_keys, int offset = 0) {
     int iter = length / chunk_size;
 
     Ciphertext output = input;
@@ -46,18 +54,33 @@ Ciphertext rotation_and_add(Ciphertext& input, int length, int chunk_size, Evalu
     while (iter > 1) {
         int step = (int) (iter / 2) * chunk_size; // march by half each time
         Ciphertext tmp1, tmp2;
-        evaluator.rotate_rows(output, step+offset, rot_keys, tmp1);
-        if (iter % 2) {
-            step = (iter - 1) * chunk_size;
-            if (!carry_over_init) {
-                evaluator.rotate_rows(output, step+offset, rot_keys, carry_over);
-                carry_over_init = true;
-            } else {
-                evaluator.rotate_rows(output, step+offset, rot_keys, tmp2);
-                evaluator.add_inplace(carry_over, tmp2);
+        if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+            evaluator.rotate_vector(output, step+offset, rot_keys, tmp1);
+            if (iter % 2) {
+                step = (iter - 1) * chunk_size;
+                if (!carry_over_init) {
+                    evaluator.rotate_vector(output, step+offset, rot_keys, carry_over);
+                    carry_over_init = true;
+                } else {
+                    evaluator.rotate_vector(output, step+offset, rot_keys, tmp2);
+                    evaluator.add_inplace(carry_over, tmp2);
+                }
             }
+            evaluator.add_inplace(output, tmp1);
+        } else {
+            evaluator.rotate_rows(output, step+offset, rot_keys, tmp1);
+            if (iter % 2) {
+                step = (iter - 1) * chunk_size;
+                if (!carry_over_init) {
+                    evaluator.rotate_rows(output, step+offset, rot_keys, carry_over);
+                    carry_over_init = true;
+                } else {
+                    evaluator.rotate_rows(output, step+offset, rot_keys, tmp2);
+                    evaluator.add_inplace(carry_over, tmp2);
+                }
+            }
+            evaluator.add_inplace(output, tmp1);
         }
-        evaluator.add_inplace(output, tmp1);
 
         iter = iter / 2;
     }
@@ -67,6 +90,71 @@ Ciphertext rotation_and_add(Ciphertext& input, int length, int chunk_size, Evalu
     }
 
     return output;
+}
+
+void sample_one_hot_encoding_inputs_ckks(vector<Ciphertext>& inputs_X, vector<Ciphertext>& inputs_Y, int data_size,
+                                    int attr_size, int val_size, int label_size, CKKSEncoder& ckks_encoder,
+                                    Encryptor& encryptor) {
+    
+    vector<vector<vector<int>>> inputs(data_size);
+    vector<vector<double>> labels(data_size);
+
+    auto rng = std::make_shared<Blake2xbPRNGFactory>(Blake2xbPRNGFactory(seed_glb));
+    RandomToStandardAdapter engine(rng->create());
+    uniform_int_distribution<uint32_t> dist(0, val_size), dist_label(0, label_size);
+
+    for (int i = 0; i < data_size; i++) {
+        inputs[i].resize(attr_size);
+        for (int j = 0; j < attr_size; j++) {
+            inputs[i][j].resize(val_size, 0);
+            inputs[i][j][dist(engine) % val_size] = 1; // randomly assign a value to the attribute
+        }
+    }
+    for (int i = 0; i < data_size; i++) {
+        labels[i].resize(label_size, 0);
+        labels[i][dist_label(engine) % label_size] = 1; // randomly assign a label to the datapoints
+    }
+
+    int num_of_ct = ceil((double) data_size * attr_size * val_size / (double) poly_modulus_degree_glb);
+
+    inputs_X.resize(num_of_ct);
+    inputs_Y.resize(1); // default
+
+    // arranged by attributes --> values --> datapoints
+    vector<double> x(poly_modulus_degree_glb, 0);
+    Plaintext pl;
+    for (int i = 0; i < num_of_ct; i++) {
+        for (int j = 0; j < (int) poly_modulus_degree_glb; j++) {
+            int attr_ind = j / (val_size * data_size);
+            int val_ind = (j / data_size) % val_size;
+            int data_ind = j % data_size;
+            if (attr_ind < attr_size) {
+                x[j] = inputs[data_ind][attr_ind][val_ind];
+                // cout << data_ind << " , " << attr_ind << " , " << val_ind << " , " << x[j] << endl;
+            }
+        }
+        ckks_encoder.encode(x, scale, pl);
+
+        // for (int c = 0; c < (int) poly_modulus_degree_glb; c++) {
+        //     cout << x[c] << " ";
+        // }
+        // cout << endl;
+        encryptor.encrypt(pl, inputs_X[i]);
+    }
+    //arrange by label values --> datapoints
+    for (int i = 0; i < (int) poly_modulus_degree_glb; i++) {
+        int label_ind = i / data_size;
+        int data_ind = i % data_size;
+        if (label_ind < label_size) {
+            x[i] = labels[data_ind][label_ind];
+        } else {
+            x[i] = 0;
+        }
+    }
+    ckks_encoder.encode(x, scale, pl);
+    encryptor.encrypt(pl, inputs_Y[0]);
+
+    cout << "Encoding inputs to " << num_of_ct << " ciphertexts...\n";
 }
 
 void sample_one_hot_encoding_inputs(vector<Ciphertext>& inputs_X, vector<Ciphertext>& inputs_Y, int data_size,
@@ -92,10 +180,7 @@ void sample_one_hot_encoding_inputs(vector<Ciphertext>& inputs_X, vector<Ciphert
         labels[i][dist_label(engine) % label_size] = 1; // randomly assign a label to the datapoints
     }
 
-    // cout << inputs << endl;
-
     int num_of_ct = ceil((double) data_size * attr_size * val_size / (double) poly_modulus_degree_glb);
-    cout << "Encoding inputs to " << num_of_ct << " ciphertexts...\n";
 
     inputs_X.resize(num_of_ct);
     inputs_Y.resize(1); // default
@@ -110,15 +195,11 @@ void sample_one_hot_encoding_inputs(vector<Ciphertext>& inputs_X, vector<Ciphert
             int data_ind = j % data_size;
             if (attr_ind < attr_size) {
                 x[j] = inputs[data_ind][attr_ind][val_ind];
-                // cout << data_ind << " , " << attr_ind << " , " << val_ind << " , " << x[j] << endl;
             }
         }
         batch_encoder.encode(x, pl);
 
-        // for (int c = 0; c < (int) poly_modulus_degree_glb; c++) {
-        //     cout << x[c] << " ";
-        // }
-        // cout << endl;
+
         encryptor.encrypt(pl, inputs_X[i]);
     }
     //arrange by label values --> datapoints
@@ -133,6 +214,8 @@ void sample_one_hot_encoding_inputs(vector<Ciphertext>& inputs_X, vector<Ciphert
     }
     batch_encoder.encode(x, pl);
     encryptor.encrypt(pl, inputs_Y[0]);
+
+    cout << "Encoding inputs to " << num_of_ct << " ciphertexts...\n";
 }
 
 
@@ -141,31 +224,59 @@ void sample_one_hot_encoding_inputs(vector<Ciphertext>& inputs_X, vector<Ciphert
 // for example, if we have 5 datapoints, with 3 labels, and the mapping is: 1 -> 1, 2 --> 1, 3 --> 3, 4 --> 2, 5 --> 3
 // then we could have the final outputs to be ((1,1,0,0,0), (0,0,0,1,0), (0,0,1,0,1))
 // if the vector length if way bigger than data size, then the indicator vector would repeat and fill the whole ciphertext vector
-vector<Ciphertext> preprocess_label(vector<Ciphertext>& inputs_Y, Encryptor& encryptor, Evaluator& evaluator, GaloisKeys& gal_keys,
-                                    int data_size = data_size_glb, int label_size = label_size_glb) {
+vector<Ciphertext> preprocess_label(SEALContext& context, vector<Ciphertext>& inputs_Y, Encryptor& encryptor, Evaluator& evaluator,
+                                    GaloisKeys& gal_keys, int data_size = data_size_glb, int label_size = label_size_glb) {
     
     vector<Ciphertext> outputs(label_size);
 
-    Plaintext pl_ext;
-    pl_ext.resize(poly_modulus_degree_glb);
-	pl_ext.parms_id() = parms_id_zero;
+    if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+        Plaintext pl_ext;
+        CKKSEncoder encoder(context);
+        vector<double> extractor_vec(poly_modulus_degree_glb);
 
-    for (int i = 0; i < (int) poly_modulus_degree_glb; i++) {
-        pl_ext.data()[i] = 0;
-    }
+        int label_per_ct = poly_modulus_degree_glb / (data_size);
 
-    int label_per_ct = poly_modulus_degree_glb / (data_size);
+        for (int i = 0; i < label_size; i++) {
+            int ct_ind = i * data_size / poly_modulus_degree_glb;
 
-    for (int i = 0; i < label_size; i++) {
-        int ct_ind = i * data_size / poly_modulus_degree_glb;
-        for (int j = data_size * (i % label_per_ct); j < data_size * ((i%label_per_ct)+1); j++) {
-            pl_ext.data()[j] = 1;
+            for (size_t i = 0; i < poly_modulus_degree_glb; i++) {
+                if (i >= data_size * (i % label_per_ct) && i < data_size * ((i%label_per_ct)+1)) {
+                    extractor_vec[i] = 1.0;
+                } else {
+                    extractor_vec[i] = 0.0;
+                }
+            }
+            encoder.encode(extractor_vec, scale, pl_ext);
+
+            evaluator.multiply_plain(inputs_Y[ct_ind], pl_ext, outputs[i]);
         }
-        evaluator.multiply_plain(inputs_Y[ct_ind], pl_ext, outputs[i]);
-    }
 
-    for (int i = 0; i < (int) outputs.size(); i++) {
-        outputs[i] = rotation_and_fill(outputs[i], data_size * value_size_glb, evaluator, gal_keys);
+        for (int i = 0; i < (int) outputs.size(); i++) {
+            outputs[i] = rotation_and_fill(context, outputs[i], data_size * value_size_glb, evaluator, gal_keys);
+        }
+
+    } else {
+        Plaintext pl_ext;
+
+        pl_ext.resize(poly_modulus_degree_glb);
+        pl_ext.parms_id() = parms_id_zero;
+        for (int i = 0; i < (int) poly_modulus_degree_glb; i++) {
+            pl_ext.data()[i] = 0;
+        }
+
+        int label_per_ct = poly_modulus_degree_glb / (data_size);
+
+        for (int i = 0; i < label_size; i++) {
+            int ct_ind = i * data_size / poly_modulus_degree_glb;
+            for (int j = data_size * (i % label_per_ct); j < data_size * ((i%label_per_ct)+1); j++) {
+                pl_ext.data()[j] = 1;
+            }
+            evaluator.multiply_plain(inputs_Y[ct_ind], pl_ext, outputs[i]);
+        }
+
+        for (int i = 0; i < (int) outputs.size(); i++) {
+            outputs[i] = rotation_and_fill(context, outputs[i], data_size * value_size_glb, evaluator, gal_keys);
+        }
     }
 
     return outputs;
@@ -173,71 +284,81 @@ vector<Ciphertext> preprocess_label(vector<Ciphertext>& inputs_Y, Encryptor& enc
 
 // arrange the parition by threshold_within_value --> left/right --> label_value, notice that all attributes are packed together
 void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& inputs_Y, vector<vector<Ciphertext>>& partitioned,
-                              vector<vector<vector<Ciphertext>>>& partitioned_labels,
-                              BatchEncoder& batch_encoder, Evaluator& evaluator, Encryptor& encryptor, GaloisKeys& gal_keys,
+                              vector<vector<vector<Ciphertext>>>& partitioned_labels, SEALContext& context, 
+                              Evaluator& evaluator, Encryptor& encryptor, GaloisKeys& gal_keys,
                               RelinKeys& relin_keys, int data_size = data_size_glb, int attr_size = attr_size_glb,
                               int val_size = value_size_glb, int label_size = label_size_glb) {
                     
+    cout << "Preprocessing for all possible threshold values...\n";
+
     for (int i = 0; i < (int) partitioned.size(); i++) {
         partitioned[i].resize((val_size*2-1)); // there are that many possible threshold values for partitioning
     }
     for (int i = 0; i < (int) partitioned.size(); i++) {
         partitioned_labels[i].resize(label_size, vector<Ciphertext>(val_size*2-1));
     }
-    // partitioned_labels.resize(label_size * (val_size*2-1)); // there are that many possible threshold values for partitioning
     
     // notice that all attributes are packed together
     // i.e., each ciphertext encrypts "the indicators of datapoints for threshold \theta for all attributes"
-
-    cout << "Preprocessing for all possible threshold values...\n";
-
     // since all attributes are packed together, rotation and addition could be applied to all attributes for
     // a specific threshold value simultaneously
-    Ciphertext tmp;
-    for (int i = 0; i < val_size; i++) {
-        if (i == 0) { // group all datapoints together
-            for (int cnt = 0; cnt < (int) inputs_X.size(); cnt++) { 
-                tmp = inputs_X[cnt];
-                partitioned[cnt][0] = rotation_and_add(tmp, data_size * val_size, data_size, evaluator, gal_keys, 0);
-            }
-        } else {
-            for (int cnt = 0; cnt < (int) inputs_X.size(); cnt++) { 
-                tmp = inputs_X[cnt];
-                partitioned[cnt][(2*i-1)] = rotation_and_add(tmp, data_size * i, data_size, evaluator, gal_keys, 0); // left partition
-                
-                tmp = inputs_X[cnt];
-                partitioned[cnt][2*i] = rotation_and_add(tmp, data_size * (val_size-i), data_size, evaluator, gal_keys, data_size * i); // right partition
-                evaluator.rotate_rows_inplace(partitioned[cnt][2*i], data_size * i, gal_keys);
-            }
-        }
-    }
 
-    cout << "   Input X preprocessed.\n";
+    int thread_chunk = max(1, (int)ceil((float)val_size / (float)num_cores));
 
-    vector<Ciphertext> processed_labels = preprocess_label(inputs_Y, encryptor, evaluator, gal_keys);
-
-    cout << "   Input Y preprocessed.\n";
-
-
-    for (int cnt = 0; cnt < (int) partitioned.size(); cnt++) {
-        for (int i = 0; i < (int) val_size; i++) {
-            if (i == 0) {
-                for (int j = 0; j < label_size; j++) {
-                    evaluator.multiply(partitioned[cnt][i], processed_labels[j], partitioned_labels[cnt][j][i]);
-                    evaluator.relinearize_inplace(partitioned_labels[cnt][j][i], relin_keys);
+    NTL::SetNumThreads(num_cores);
+    NTL_EXEC_RANGE(num_cores, first, last);
+    for (int tt = first; tt < last; tt++) {
+        Ciphertext tmp;
+        for (int i = tt*thread_chunk; i < min(val_size, (tt+1)*thread_chunk); i++) {
+            if (i == 0) { // group all datapoints together
+                for (int cnt = 0; cnt < (int) inputs_X.size(); cnt++) { 
+                    tmp = inputs_X[cnt];
+                    partitioned[cnt][0] = rotation_and_add(context, tmp, data_size * val_size, data_size, evaluator, gal_keys, 0);
                 }
             } else {
-                for (int j = 0; j < label_size; j++) {
-                    evaluator.multiply(partitioned[cnt][(2*i-1)], processed_labels[j], partitioned_labels[cnt][j][(2*i-1)]);
-                    evaluator.relinearize_inplace(partitioned_labels[cnt][j][(2*i-1)], relin_keys);
-                    evaluator.multiply(partitioned[cnt][2*i], processed_labels[j], partitioned_labels[cnt][j][2*i]);
-                    evaluator.relinearize_inplace(partitioned_labels[cnt][j][2*i], relin_keys);
+                for (int cnt = 0; cnt < (int) inputs_X.size(); cnt++) { 
+                    tmp = inputs_X[cnt];
+                    partitioned[cnt][(2*i-1)] = rotation_and_add(context, tmp, data_size * i, data_size, evaluator, gal_keys, 0); // left partition
+                    
+                    tmp = inputs_X[cnt];
+                    partitioned[cnt][2*i] = rotation_and_add(context, tmp, data_size * (val_size-i), data_size, evaluator, gal_keys, data_size * i); // right partition
+                    if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                        evaluator.rotate_vector_inplace(partitioned[cnt][2*i], data_size * i, gal_keys);
+                    } else {
+                        evaluator.rotate_rows_inplace(partitioned[cnt][2*i], data_size * i, gal_keys);
+                    }
                 }
             }
         }
     }
+    NTL_EXEC_RANGE_END;
+    cout << "   Input X preprocessed.\n";
 
-    cout << "   Threshold value with labels pre-partitioned.\n";
+    vector<Ciphertext> processed_labels = preprocess_label(context, inputs_Y, encryptor, evaluator, gal_keys);
+    
+    thread_chunk = max(1, (int)ceil((float) partitioned.size() / (float) num_cores));
+    NTL_EXEC_RANGE(num_cores, first, last);
+    for (int tt = first; tt < last; tt++) {
+        for (int cnt = tt*thread_chunk; cnt < min((int) partitioned.size(), (tt+1)*thread_chunk); cnt++) {
+            for (int i = 0; i < (int) val_size; i++) {
+                if (i == 0) {
+                    for (int j = 0; j < label_size; j++) {
+                        evaluator.multiply(partitioned[cnt][i], processed_labels[j], partitioned_labels[cnt][j][i]);
+                        evaluator.relinearize_inplace(partitioned_labels[cnt][j][i], relin_keys);
+                    }
+                } else {
+                    for (int j = 0; j < label_size; j++) {
+                        evaluator.multiply(partitioned[cnt][(2*i-1)], processed_labels[j], partitioned_labels[cnt][j][(2*i-1)]);
+                        evaluator.relinearize_inplace(partitioned_labels[cnt][j][(2*i-1)], relin_keys);
+                        evaluator.multiply(partitioned[cnt][2*i], processed_labels[j], partitioned_labels[cnt][j][2*i]);
+                        evaluator.relinearize_inplace(partitioned_labels[cnt][j][2*i], relin_keys);
+                    }
+                }
+            }
+        }
+    }
+    NTL_EXEC_RANGE_END;
+    cout << "   Input Y preprocessed.\n";
 }
 
 // based on the selection vector, "partitions_for_node" records all selected datapoints for each threshold value
@@ -249,7 +370,7 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
 void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partitions,
                                 vector<vector<vector<Ciphertext>>>& preprocessed_partitioned_labels,
                                 vector<vector<Ciphertext>>& partitions_for_node,
-                                vector<vector<vector<Ciphertext>>>& partition_labels_for_node,
+                                vector<vector<vector<Ciphertext>>>& partition_labels_for_node, SEALContext& context, 
                                 Ciphertext& selection_vector, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys,
                                 bool multi_thread = false) {
 
@@ -271,11 +392,12 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
             int end_1 = (tt == last-1) ? (int) preprocessed_partitions[0].size() : (tt+1) * thread_chunk_size_1;
             for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
                 for (int i = tt * thread_chunk_size_1; i < end_1; i++) {
-                    evaluator.mod_switch_to_inplace(preprocessed_partitions[cnt][i], selection_vector.parms_id());
-                    evaluator.multiply(preprocessed_partitions[cnt][i], selection_vector, partitions_for_node[cnt][i]);
+                    Ciphertext tmp = preprocessed_partitions[cnt][i];
+                    evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                    evaluator.multiply(tmp, selection_vector, partitions_for_node[cnt][i]);
                     evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
                     evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
-                    partitions_for_node[cnt][i] = rotation_and_add(partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
+                    partitions_for_node[cnt][i] = rotation_and_add(context, partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
                 }
             }
 
@@ -283,14 +405,15 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
             for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt++) {
                 for (int l = 0; l < label_size_glb; l++) {
                     for (int i = tt * thread_chunk_size_2; i < end_2; i++) {
-                        evaluator.mod_switch_to_inplace(preprocessed_partitioned_labels[cnt][l][i], selection_vector.parms_id());
-                        evaluator.multiply(preprocessed_partitioned_labels[cnt][l][i], selection_vector, partition_labels_for_node[cnt][l][i]);
+                        Ciphertext tmp = preprocessed_partitioned_labels[cnt][l][i];
+                        evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                        evaluator.multiply(tmp, selection_vector, partition_labels_for_node[cnt][l][i]);
                         evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
-                        partition_labels_for_node[cnt][l][i] = rotation_and_add(partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
+                        partition_labels_for_node[cnt][l][i] = rotation_and_add(context, partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
                         
-                        evaluator.mod_switch_to_next_inplace(partition_labels_for_node[cnt][l][i]);
                         evaluator.square_inplace(partition_labels_for_node[cnt][l][i]);
                         evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
+                        evaluator.mod_switch_to_next_inplace(partition_labels_for_node[cnt][l][i]);
                     }
                 }
             }
@@ -299,34 +422,77 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
     } else {
         for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
             for (int i = 0; i < (int) preprocessed_partitions[0].size(); i++) {
-                evaluator.mod_switch_to_inplace(preprocessed_partitions[cnt][i], selection_vector.parms_id());
-                evaluator.multiply(preprocessed_partitions[cnt][i], selection_vector, partitions_for_node[cnt][i]);
+                Ciphertext tmp = preprocessed_partitions[cnt][i];
+                evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                evaluator.multiply(tmp, selection_vector, partitions_for_node[cnt][i]);
                 evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
                 evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
-                partitions_for_node[cnt][i] = rotation_and_add(partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
+                partitions_for_node[cnt][i] = rotation_and_add(context, partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
             }
         }
 
         for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt++) {
             for (int l = 0; l < label_size_glb; l++) {
                 for (int i = 0; i < (int) preprocessed_partitioned_labels.size(); i++) {
-                    evaluator.mod_switch_to_inplace(preprocessed_partitioned_labels[cnt][l][i], selection_vector.parms_id());
-                    evaluator.multiply(preprocessed_partitioned_labels[cnt][l][i], selection_vector, partition_labels_for_node[cnt][l][i]);
+                    Ciphertext tmp = preprocessed_partitioned_labels[cnt][l][i];
+                    evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                    evaluator.multiply(tmp, selection_vector, partition_labels_for_node[cnt][l][i]);
                     evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
-                    partition_labels_for_node[cnt][l][i] = rotation_and_add(partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
-                    
-                    evaluator.mod_switch_to_next_inplace(partition_labels_for_node[cnt][l][i]);
+                    partition_labels_for_node[cnt][l][i] = rotation_and_add(context, partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
+
                     evaluator.square_inplace(partition_labels_for_node[cnt][l][i]);
                     evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
+                    evaluator.mod_switch_to_next_inplace(partition_labels_for_node[cnt][l][i]);
                 }
             }
         }
     }
 }
 
+void update_selection_vector_ckks(vector<Ciphertext>& selection_vector, vector<vector<Ciphertext>>& preprocessed_partitions,
+                             int threshold_attr_ind, int threshold_val_ind, int cur_depth, int curr_node, SEALContext& context, 
+                             CKKSEncoder& ckks_encoder, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys) {
+
+    int parent_sel_ind = pow(2, cur_depth)-1 + curr_node;
+    int child_sel_ind = parent_sel_ind * 2 + 1;
+    
+   
+    Ciphertext threshold_data;
+    vector<double> extractor_msg(poly_modulus_degree_glb, 0);
+
+    int attr_per_ct = poly_modulus_degree_glb / (label_size_glb * data_size_glb); // how many attr one ciphertext can pack
+
+    int start_ind = (threshold_attr_ind % attr_per_ct) * data_size_glb * value_size_glb; 
+    int end_ind = start_ind + data_size_glb;
+    for (int i = start_ind; i < end_ind; i++) {
+        extractor_msg[i] = 1;
+    }
+    Plaintext extractor_pl;
+    ckks_encoder.encode(extractor_msg, scale, extractor_pl);
+
+
+    for (int i = 0; i < 2; i++) {
+        evaluator.multiply_plain(preprocessed_partitions[threshold_attr_ind / attr_per_ct][threshold_val_ind + 1 - i%2],
+                                 extractor_pl,
+                                 threshold_data);
+        if (start_ind > poly_modulus_degree_glb / 2) {
+            evaluator.rotate_columns_inplace(threshold_data, gal_keys);
+            evaluator.rotate_rows_inplace(threshold_data, start_ind - poly_modulus_degree_glb/2, gal_keys);
+        }
+        threshold_data = rotation_and_fill(context, threshold_data, data_size_glb * value_size_glb, evaluator, gal_keys);
+        evaluator.mod_switch_to_inplace(threshold_data, selection_vector[parent_sel_ind].parms_id());
+        evaluator.multiply(selection_vector[parent_sel_ind], threshold_data, selection_vector[child_sel_ind+i]);
+        evaluator.relinearize_inplace(selection_vector[child_sel_ind+i], relin_keys);
+
+        if ((cur_depth % 2) == 0 && cur_depth != 0) {
+            evaluator.mod_switch_to_next_inplace(selection_vector[child_sel_ind+i]);
+        }
+    }
+}
+
 
 void update_selection_vector(vector<Ciphertext>& selection_vector, vector<vector<Ciphertext>>& preprocessed_partitions,
-                             int threshold_attr_ind, int threshold_val_ind, int cur_depth, int curr_node,
+                             int threshold_attr_ind, int threshold_val_ind, int cur_depth, int curr_node, SEALContext& context,
                              BatchEncoder& batch_encoder, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys) {
 
     int parent_sel_ind = pow(2, cur_depth)-1 + curr_node;
@@ -355,7 +521,8 @@ void update_selection_vector(vector<Ciphertext>& selection_vector, vector<vector
             evaluator.rotate_columns_inplace(threshold_data, gal_keys);
             evaluator.rotate_rows_inplace(threshold_data, start_ind - poly_modulus_degree_glb/2, gal_keys);
         }
-        threshold_data = rotation_and_fill(threshold_data, data_size_glb * value_size_glb, evaluator, gal_keys);
+        threshold_data = rotation_and_fill(context, threshold_data, data_size_glb * value_size_glb, evaluator, gal_keys);
+        evaluator.mod_switch_to_inplace(threshold_data, selection_vector[parent_sel_ind].parms_id());
         evaluator.multiply(selection_vector[parent_sel_ind], threshold_data, selection_vector[child_sel_ind+i]);
         evaluator.relinearize_inplace(selection_vector[child_sel_ind+i], relin_keys);
 
