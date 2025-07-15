@@ -30,8 +30,9 @@ int main() {
 	EncryptionParameters bfv_params(scheme_type::ckks);
 	bfv_params.set_poly_modulus_degree(poly_modulus_degree_glb*2);
 
+	// TODO: can do faster, with scale = 30bits and group two multi into one, need to be really carefully for noise control though...
 	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb*2, {
-														60, 40, 40, 40, 
+														60, 40, 40, 40, 40,
 														40, 40, 40, 40, 60
 													});
 	bfv_params.set_coeff_modulus(coeff_modulus);
@@ -197,10 +198,15 @@ int main() {
 					// 	 << ", " << log2(preprocessed_partitions[0][0].scale()) << endl;
 					// cout << "	data chain: " << seal_context.get_context_data(preprocessed_partitioned_labels[0][0][0].parms_id())->chain_index() \
 					// 	 << ", " << log2(preprocessed_partitioned_labels[0][0][0].scale()) << endl;
+
+					// notice that we separate the partitions_for_node and partitions_for_node_squared, since the latter is used for MPC for comparison of MGI
+					// and the former one is reserved for selection_vector update
 					vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size(),
 																   vector<Ciphertext>((int) preprocessed_partitions[0].size()));
+					vector<vector<Ciphertext>> partitions_for_node_squared((int) preprocessed_partitions.size(),
+																   vector<Ciphertext>((int) preprocessed_partitions[0].size()));
 					vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
-					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, 
+					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, partitions_for_node_squared,
 											partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
 											relin_keys, gal_keys_rot, !multi_thread);
 
@@ -229,8 +235,9 @@ int main() {
 				
 				// based on previous parent partition, threshold attribute value, each #data_size chunk record 
 				vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size());
+				vector<vector<Ciphertext>> partitions_for_node_squared((int) preprocessed_partitions.size());
 				vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
-				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, 
+				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, partitions_for_node_squared,
 										partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
 										relin_keys, gal_keys_rot, !multi_thread);
 

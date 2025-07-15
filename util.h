@@ -42,7 +42,7 @@ Ciphertext rotation_and_fill(SEALContext& context, Ciphertext& input, int length
     return output;
 }
 
-// for a length n vector, sum all chunks into one
+// for a length n vector, group by chunk_size; so if chunk_size = 1, then sum up the whole vector; one ciphertext could pack multi vectors
 Ciphertext rotation_and_add(SEALContext& context, Ciphertext& input, int length, int chunk_size, Evaluator& evaluator,
                             GaloisKeys& rot_keys, int offset = 0) {
     int iter = length / chunk_size;
@@ -380,19 +380,22 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
 
 // based on the selection vector, "partitions_for_node" records all selected datapoints for each threshold value
 // and "partition_labels_for_node" records all selected datapoints for for each threshold with certain label
-// after rotation_and_add, each ciphertext encodes multiple chunks, chunk_size = data_size * val_size
+// after rotation_and_add, each ciphertext encodes multiple chunks, chunk_size = data_size
 // the first entry of each chunk is |D|, where D is the dataset partitioned based on threshold, selection_vector 
+// notice that as for preprocessed_partitions, each ciphertext pack all attributes, as long as data_size * attr_size < poly_deg
 // (and label, if the ciphertext is "partition_labels_for_node")
-// for "partition_labels_for_node", we also take the square to facilitate the MPC computation
+// we also take the square to facilitate the MPC computation of MGI
 void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partitions,
                                 vector<vector<vector<Ciphertext>>>& preprocessed_partitioned_labels,
                                 vector<vector<Ciphertext>>& partitions_for_node,
+                                vector<vector<Ciphertext>>& partitions_for_node_squared,
                                 vector<vector<vector<Ciphertext>>>& partition_labels_for_node, SEALContext& context, 
                                 Ciphertext& selection_vector, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys,
                                 bool multi_thread = false) {
 
     for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
         partitions_for_node[cnt].resize((int) preprocessed_partitions[cnt].size());
+        partitions_for_node_squared[cnt].resize((int) preprocessed_partitions[cnt].size());
     }
 
     for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt ++) {
@@ -423,6 +426,14 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                         evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
                     }
                     partitions_for_node[cnt][i] = rotation_and_add(context, partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
+
+                    evaluator.multiply(partitions_for_node[cnt][i], partitions_for_node[cnt][i], partitions_for_node_squared[cnt][i]);
+                    evaluator.relinearize_inplace(partitions_for_node_squared[cnt][i], relin_keys);
+                    if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                        evaluator.rescale_to_next_inplace(partitions_for_node_squared[cnt][i]);
+                    } else {
+                        evaluator.mod_switch_to_next_inplace(partitions_for_node_squared[cnt][i]);
+                    }
                 }
             }
         }
@@ -481,6 +492,14 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                     evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
                 }
                 partitions_for_node[cnt][i] = rotation_and_add(context, partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
+
+                evaluator.multiply(partitions_for_node[cnt][i], partitions_for_node[cnt][i], partitions_for_node_squared[cnt][i]);
+                evaluator.relinearize_inplace(partitions_for_node_squared[cnt][i], relin_keys);
+                if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                    evaluator.rescale_to_next_inplace(partitions_for_node_squared[cnt][i]);
+                } else {
+                    evaluator.mod_switch_to_next_inplace(partitions_for_node_squared[cnt][i]);
+                }
             }
         }
 
