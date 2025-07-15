@@ -410,7 +410,11 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
             for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
                 for (int i = tt * thread_chunk_size_1; i < end_1; i++) {
                     Ciphertext tmp = preprocessed_partitions[cnt][i];
-                    evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                    if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(selection_vector.parms_id())->chain_index()) {
+                        evaluator.mod_switch_to_inplace(selection_vector, tmp.parms_id());
+                    } else {
+                        evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                    }
                     evaluator.multiply(tmp, selection_vector, partitions_for_node[cnt][i]);
                     evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
                     if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
@@ -421,19 +425,32 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                     partitions_for_node[cnt][i] = rotation_and_add(context, partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
                 }
             }
+        }
+        NTL_EXEC_RANGE_END;
 
+        // this bug is really something.... somehow if I have two different for loops inside this multi-thread, then the second for loop would have only one thread executing
+        // the last chunk, i.e., for 4 cores, I would always have first = 3 for the second for loop, ridiculous!!!!
+        // so I split them into two separate thread pool, small overhead for spinning up the pool, but..... WHY????
+        NTL_EXEC_RANGE(num_cores, first, last);
+        for (int tt = first; tt < last; tt++) {
             int end_2 = (tt == last-1) ? (int) preprocessed_partitioned_labels[0][0].size() : (tt+1) * thread_chunk_size_2;
             for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt++) {
                 for (int l = 0; l < label_size_glb; l++) {
                     for (int i = tt * thread_chunk_size_2; i < end_2; i++) {
                         Ciphertext tmp = preprocessed_partitioned_labels[cnt][l][i];
-                        evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                        if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(selection_vector.parms_id())->chain_index()) {
+                            evaluator.mod_switch_to_inplace(selection_vector, tmp.parms_id());
+                        } else {
+                            evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                        }
+
                         evaluator.multiply(tmp, selection_vector, partition_labels_for_node[cnt][l][i]);
                         evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
-                        partition_labels_for_node[cnt][l][i] = rotation_and_add(context, partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
                         if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
                             evaluator.rescale_to_next_inplace(partition_labels_for_node[cnt][l][i]);
                         }
+                        partition_labels_for_node[cnt][l][i] = rotation_and_add(context, partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
+                        
                         evaluator.square_inplace(partition_labels_for_node[cnt][l][i]);
                         evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
                         if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
@@ -450,9 +467,14 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
         for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
             for (int i = 0; i < (int) preprocessed_partitions[0].size(); i++) {
                 Ciphertext tmp = preprocessed_partitions[cnt][i];
-                evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(selection_vector.parms_id())->chain_index()) {
+                    evaluator.mod_switch_to_inplace(selection_vector, tmp.parms_id());
+                } else {
+                    evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                }
                 evaluator.multiply(tmp, selection_vector, partitions_for_node[cnt][i]);
                 evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
+
                 if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
                     evaluator.rescale_to_next_inplace(partitions_for_node[cnt][i]);
                 } else {
@@ -466,7 +488,11 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
             for (int l = 0; l < label_size_glb; l++) {
                 for (int i = 0; i < (int) preprocessed_partitioned_labels.size(); i++) {
                     Ciphertext tmp = preprocessed_partitioned_labels[cnt][l][i];
-                    evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                    if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(selection_vector.parms_id())->chain_index()) {
+                        evaluator.mod_switch_to_inplace(selection_vector, tmp.parms_id());
+                    } else {
+                        evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                    }
                     evaluator.multiply(tmp, selection_vector, partition_labels_for_node[cnt][l][i]);
                     evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
                     partition_labels_for_node[cnt][l][i] = rotation_and_add(context, partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
@@ -484,7 +510,6 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
             }
         }
     }
-
 }
 
 void update_selection_vector_ckks(vector<Ciphertext>& selection_vector, vector<vector<Ciphertext>>& preprocessed_partitions,
@@ -518,12 +543,19 @@ void update_selection_vector_ckks(vector<Ciphertext>& selection_vector, vector<v
         //     evaluator.rotate_rows_inplace(threshold_data, start_ind - poly_modulus_degree_glb/2, gal_keys);
         // }
         threshold_data = rotation_and_fill(context, threshold_data, data_size_glb * value_size_glb, evaluator, gal_keys);
-        evaluator.mod_switch_to_inplace(threshold_data, selection_vector[parent_sel_ind].parms_id());
+        evaluator.rescale_to_next_inplace(threshold_data);
+        if (context.get_context_data(threshold_data.parms_id())->chain_index() < context.get_context_data(selection_vector[parent_sel_ind].parms_id())->chain_index()) {
+            evaluator.mod_switch_to_inplace(selection_vector[parent_sel_ind], threshold_data.parms_id());
+        } else {
+            evaluator.mod_switch_to_inplace(threshold_data, selection_vector[parent_sel_ind].parms_id());
+        }
+        
         evaluator.multiply(selection_vector[parent_sel_ind], threshold_data, selection_vector[child_sel_ind+i]);
         evaluator.relinearize_inplace(selection_vector[child_sel_ind+i], relin_keys);
 
         evaluator.rescale_to_next_inplace(selection_vector[child_sel_ind+i]);
-        cout << "Update chain: " << context.get_context_data(selection_vector[child_sel_ind+i].parms_id())->chain_index() << endl;
+        // cout << "Update chain: " << context.get_context_data(selection_vector[child_sel_ind+i].parms_id())->chain_index() \
+        //      << ", " << log2(selection_vector[child_sel_ind+i].scale()) << endl;
     }
 }
 

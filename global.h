@@ -2,7 +2,7 @@
 #include "seal/seal.h"
 using namespace seal;
 
-size_t poly_modulus_degree_glb = 16384; 
+size_t poly_modulus_degree_glb = 8192; 
 // when using ckks, since we encode complex numbers, half are imaginery, the real dim is doubled
 
 // (root, ring_dim) --> root^(2*ring_dim) % 65527 = 1

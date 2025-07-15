@@ -32,8 +32,6 @@ int main() {
 
 	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb*2, {
 														60, 40, 40, 40, 
-														40, 40, 40, 40,
-														40, 40, 40, 40, 
 														40, 40, 40, 40, 60
 													});
 	bfv_params.set_coeff_modulus(coeff_modulus);
@@ -174,12 +172,12 @@ int main() {
 
 	time_start = chrono::high_resolution_clock::now();
 
-	update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, 0, 0,
-							seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
+	// update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, 0, 0,
+	// 						seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
 
 	cout << "Intial update: " << seal_context.get_context_data(selection_vector[0].parms_id())->chain_index() << endl;
 
-	for (int d = 1; d < depth_glb; d++) { // for each level in the tree, except the root
+	for (int d = 0; d < depth_glb; d++) { // for each level in the tree, except the root
 		cout << "Depth: " << d << endl;
 		bool multi_thread = pow(2,d) >= 4;
 
@@ -195,6 +193,10 @@ int main() {
 					// based on previous parent partition, threshold attribute value, each #data_size chunk record 
 					// this step is used just for multiplying the newly updated selection vector
 					// sum up each data_size chunk to a single value, and then square it
+					// cout << "	data chain: " << seal_context.get_context_data(preprocessed_partitions[0][0].parms_id())->chain_index() \
+					// 	 << ", " << log2(preprocessed_partitions[0][0].scale()) << endl;
+					// cout << "	data chain: " << seal_context.get_context_data(preprocessed_partitioned_labels[0][0][0].parms_id())->chain_index() \
+					// 	 << ", " << log2(preprocessed_partitioned_labels[0][0][0].scale()) << endl;
 					vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size(),
 																   vector<Ciphertext>((int) preprocessed_partitions[0].size()));
 					vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
@@ -202,8 +204,10 @@ int main() {
 											partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
 											relin_keys, gal_keys_rot, !multi_thread);
 
-					cout << "	chain: " << seal_context.get_context_data(partitions_for_node[0][0].parms_id())->chain_index() << endl;
-					cout << "	chain: " << seal_context.get_context_data(partition_labels_for_node[0][0][0].parms_id())->chain_index() << endl;
+					// cout << "	sel chain: " << seal_context.get_context_data(partitions_for_node[0][0].parms_id())->chain_index() \
+					// 	 << ", " << log2(partitions_for_node[0][0].scale()) << endl;
+					// cout << "	sel chain: " << seal_context.get_context_data(partition_labels_for_node[0][0][0].parms_id())->chain_index() \
+					// 	 << ", " << log2(partition_labels_for_node[0][0][0].scale()) << endl;
 					// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
 					// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
 
@@ -211,9 +215,11 @@ int main() {
 					if (d != depth_glb-1) { // no need to update the leaf level
 						update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
 												seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
-						
 					}
 
+					if (d == depth_glb-1 && nd == 0) {
+						cout << "Final chain: " << seal_context.get_context_data(partition_labels_for_node[0][0][0].parms_id())->chain_index() << endl;
+					}
 				}
 			}
 			NTL_EXEC_RANGE_END;
@@ -229,8 +235,8 @@ int main() {
 										relin_keys, gal_keys_rot, !multi_thread);
 
 
-				cout << "	chain: " << seal_context.get_context_data(partitions_for_node[0][0].parms_id())->chain_index() << endl;
-				cout << "	chain: " << seal_context.get_context_data(partition_labels_for_node[0][0][0].parms_id())->chain_index() << endl;
+				// cout << "	chain: " << seal_context.get_context_data(partitions_for_node[0][0].parms_id())->chain_index() << endl;
+				// cout << "	chain: " << seal_context.get_context_data(partition_labels_for_node[0][0][0].parms_id())->chain_index() << endl;
 
 				// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
 				// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
@@ -243,7 +249,6 @@ int main() {
 		}
 	}
 
-	cout << "Final chain: " << seal_context.get_context_data(selection_vector[selection_vector.size()-1].parms_id())->chain_index() << endl;
 
 
 	time_end = chrono::high_resolution_clock::now();
