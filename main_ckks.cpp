@@ -31,7 +31,10 @@ int main() {
 	bfv_params.set_poly_modulus_degree(poly_modulus_degree_glb*2);
 
 	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb*2, {
-														60, 60, 60, 60, 60
+														60, 40, 40, 40, 
+														40, 40, 40, 40,
+														40, 40, 40, 40, 
+														40, 40, 40, 40, 60
 													});
 	bfv_params.set_coeff_modulus(coeff_modulus);
 
@@ -141,7 +144,8 @@ int main() {
 	cout << "Preprocess time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
 
 	
-
+	cout << "Intial chain: " << seal_context.get_context_data(preprocessed_partitions[0][0].parms_id())->chain_index() << endl;
+	cout << "Intial chain: " << seal_context.get_context_data(preprocessed_partitioned_labels[0][0][0].parms_id())->chain_index() << endl;
 	// Ciphertext output = rotation_and_fill(test_ct[0], data_size_glb, evaluator, gal_keys_rot);
 
 	// // for (int ccc = 0; ccc < 4; ccc++) {
@@ -158,7 +162,9 @@ int main() {
 	/////////////////////////////////////////// for each node, prepare the gini-index inputs ////////////////////////////////////////////
 	vector<Ciphertext> selection_vector(pow(2, depth_glb));
 
+
 	// just fill in random selection vectors...
+	ckks_encoder.encode(allones, scale, pl_test);
 	for (int i = 0; i < (int) selection_vector.size(); i++) {
 		encryptor.encrypt(pl_test, selection_vector[i]);
 	}
@@ -171,7 +177,10 @@ int main() {
 	update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, 0, 0,
 							seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
 
+	cout << "Intial update: " << seal_context.get_context_data(selection_vector[0].parms_id())->chain_index() << endl;
+
 	for (int d = 1; d < depth_glb; d++) { // for each level in the tree, except the root
+		cout << "Depth: " << d << endl;
 		bool multi_thread = pow(2,d) >= 4;
 
 		if (multi_thread) {
@@ -193,8 +202,8 @@ int main() {
 											partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
 											relin_keys, gal_keys_rot, !multi_thread);
 
-					cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0]) << endl;
-
+					cout << "	chain: " << seal_context.get_context_data(partitions_for_node[0][0].parms_id())->chain_index() << endl;
+					cout << "	chain: " << seal_context.get_context_data(partition_labels_for_node[0][0][0].parms_id())->chain_index() << endl;
 					// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
 					// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
 
@@ -202,9 +211,7 @@ int main() {
 					if (d != depth_glb-1) { // no need to update the leaf level
 						update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
 												seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
-
 						
-						cout << "sel: " << d << " " << decryptor.invariant_noise_budget(selection_vector[2*(pow(2, d)-1 + nd) + 1]) << endl;
 					}
 
 				}
@@ -221,7 +228,9 @@ int main() {
 										partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
 										relin_keys, gal_keys_rot, !multi_thread);
 
-				cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0]) << endl;
+
+				cout << "	chain: " << seal_context.get_context_data(partitions_for_node[0][0].parms_id())->chain_index() << endl;
+				cout << "	chain: " << seal_context.get_context_data(partition_labels_for_node[0][0][0].parms_id())->chain_index() << endl;
 
 				// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
 				// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
@@ -233,6 +242,9 @@ int main() {
 			}
 		}
 	}
+
+	cout << "Final chain: " << seal_context.get_context_data(selection_vector[selection_vector.size()-1].parms_id())->chain_index() << endl;
+
 
 	time_end = chrono::high_resolution_clock::now();
 	cout << "Re-partition the data for all nodes time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
