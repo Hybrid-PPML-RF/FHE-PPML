@@ -188,10 +188,8 @@ int main() {
 					// sum up each data_size chunk to a single value, and then square it
 					vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size(),
 																   vector<Ciphertext>((int) preprocessed_partitions[0].size()));
-					vector<vector<Ciphertext>> partitions_for_node_squared((int) preprocessed_partitions.size(),
-																   vector<Ciphertext>((int) preprocessed_partitions[0].size()));
 					vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
-					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, partitions_for_node_squared,
+					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node,
 											partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
 											relin_keys, gal_keys_rot, !multi_thread);
 
@@ -218,9 +216,8 @@ int main() {
 				
 				// based on previous parent partition, threshold attribute value, each #data_size chunk record 
 				vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size());
-				vector<vector<Ciphertext>> partitions_for_node_squared((int) preprocessed_partitions.size());
 				vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
-				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, partitions_for_node_squared,
+				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node,
 										partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
 										relin_keys, gal_keys_rot, !multi_thread);
 

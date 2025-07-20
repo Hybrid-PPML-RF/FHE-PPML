@@ -2,7 +2,7 @@
 #include "seal/seal.h"
 using namespace seal;
 
-size_t poly_modulus_degree_glb = 16384; 
+size_t poly_modulus_degree_glb = 16384;
 // when using ckks, since we encode complex numbers, half are imaginery, the real dim is doubled
 
 // (root, ring_dim) --> root^(2*ring_dim) % 65527 = 1
@@ -30,7 +30,7 @@ int label_size_glb = 3;
 
 prng_seed_type seed_glb;
 
-int depth_glb = 5; // decision tree depth
+int depth_glb = 4; // decision tree depth
 
 int num_cores = 4;
 

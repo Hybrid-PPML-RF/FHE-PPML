@@ -32,8 +32,8 @@ int main() {
 
 	// TODO: can do faster, with scale = 30bits and group two multi into one, need to be really carefully for noise control though...
 	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb*2, {
-														60, 40, 40, 40, 40,
-														40, 40, 40, 40, 60
+														60, 30, 60, 60,
+														60, 60, 60
 													});
 	bfv_params.set_coeff_modulus(coeff_modulus);
 
@@ -109,6 +109,15 @@ int main() {
 	vector<double> allones(poly_modulus_degree_glb, 1);
 	ckks_encoder.encode(allones, scale, all_ones);
 
+	Ciphertext target_ct;
+	encryptor.encrypt(all_ones, target_ct);
+	for (int i = 0; i < 3; i++) {
+		evaluator.mod_switch_to_next_inplace(target_ct);
+	}
+	bool ttt = target_ct.parms_id() != seal_context.last_parms_id();
+	cout << ttt << endl;
+	cout << "Check target modulus level: " << seal_context.get_context_data(target_ct.parms_id())->chain_index() << endl;
+
 
 	///////////////////////////////////////////// prepare the one-hot encoding for datasets /////////////////////////////////////////////
 
@@ -142,10 +151,13 @@ int main() {
 	time_end = chrono::high_resolution_clock::now();
 	cout << "Preprocess time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
 
-	
-	cout << "Intial chain: " << seal_context.get_context_data(preprocessed_partitions[0][0].parms_id())->chain_index() << endl;
-	cout << "Intial chain: " << seal_context.get_context_data(preprocessed_partitioned_labels[0][0][0].parms_id())->chain_index() << endl;
+	cout << "	Data scale: " << log2(preprocessed_partitioned_labels[0][0][0].scale()) << ", " << log2(preprocessed_partitions[0][0].scale()) << endl;
+	cout << "	Intial preprocessed chain: " << seal_context.get_context_data(preprocessed_partitions[0][0].parms_id())->chain_index() \
+		 << ", " << seal_context.get_context_data(preprocessed_partitioned_labels[0][0][0].parms_id())->chain_index() << endl;
 	// Ciphertext output = rotation_and_fill(test_ct[0], data_size_glb, evaluator, gal_keys_rot);
+
+	cout << "Ciphertext size: " << preprocessed_partitions.size() * preprocessed_partitions[0].size() << " for data, and " \
+		 << preprocessed_partitioned_labels.size() * preprocessed_partitioned_labels[0].size() * preprocessed_partitioned_labels[0][0].size() << " for labels.\n";
 
 	// // for (int ccc = 0; ccc < 4; ccc++) {
 	// decryptor.decrypt(output, pl_test);
@@ -176,7 +188,7 @@ int main() {
 	// update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, 0, 0,
 	// 						seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
 
-	cout << "Intial update: " << seal_context.get_context_data(selection_vector[0].parms_id())->chain_index() << endl;
+	cout << "	Intial selection chain: " << seal_context.get_context_data(selection_vector[0].parms_id())->chain_index() << endl;
 
 	for (int d = 0; d < depth_glb; d++) { // for each level in the tree, except the root
 		cout << "Depth: " << d << endl;
@@ -194,21 +206,20 @@ int main() {
 					// based on previous parent partition, threshold attribute value, each #data_size chunk record 
 					// this step is used just for multiplying the newly updated selection vector
 					// sum up each data_size chunk to a single value, and then square it
+					
 					// cout << "	data chain: " << seal_context.get_context_data(preprocessed_partitions[0][0].parms_id())->chain_index() \
 					// 	 << ", " << log2(preprocessed_partitions[0][0].scale()) << endl;
 					// cout << "	data chain: " << seal_context.get_context_data(preprocessed_partitioned_labels[0][0][0].parms_id())->chain_index() \
 					// 	 << ", " << log2(preprocessed_partitioned_labels[0][0][0].scale()) << endl;
 
-					// notice that we separate the partitions_for_node and partitions_for_node_squared, since the latter is used for MPC for comparison of MGI
-					// and the former one is reserved for selection_vector update
 					vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size(),
 																   vector<Ciphertext>((int) preprocessed_partitions[0].size()));
-					vector<vector<Ciphertext>> partitions_for_node_squared((int) preprocessed_partitions.size(),
-																   vector<Ciphertext>((int) preprocessed_partitions[0].size()));
 					vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
-					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, partitions_for_node_squared,
-											partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
-											relin_keys, gal_keys_rot, !multi_thread);
+					Ciphertext tmp_sel = selection_vector[sel_ind];
+					// cout << "	---> " << seal_context.get_context_data(tmp_sel.parms_id())->chain_index() << ", " << log2(tmp_sel.scale()) << endl;
+					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node,
+											   partition_labels_for_node, seal_context, tmp_sel, evaluator,
+											   relin_keys, gal_keys_rot, !multi_thread);
 
 					// cout << "	sel chain: " << seal_context.get_context_data(partitions_for_node[0][0].parms_id())->chain_index() \
 					// 	 << ", " << log2(partitions_for_node[0][0].scale()) << endl;
@@ -217,14 +228,35 @@ int main() {
 					// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
 					// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
 
+
+					// stringstream datastream;
+					// uint64_t commu_size = 0;
+					// // cout << partitions_for_node.size() << ", " << partitions_for_node[0].size() << endl;
+					// // cout << partition_labels_for_node.size() << ", " << partition_labels_for_node[0].size() << ", " << partition_labels_for_node[0][0][0].size() << endl;
+					// for (int ii = 0; ii < (int) partitions_for_node.size(); ii++) {
+					// 	for (int jj = 0; jj < (int) partitions_for_node[0].size(); jj++) {
+					// 		if (ii == 0 && jj == 0) cout << "	    before broadcast data: " << log2(partitions_for_node[ii][jj].scale()) << endl;
+					// 		// evaluator.re
+					// 		evaluator.mod_switch_to_inplace(partitions_for_node[ii][jj], target_ct.parms_id());
+					// 		commu_size += partitions_for_node[ii][jj].save(datastream);
+					// 	}
+					// }
+					// for (int ii = 0; ii < (int) partition_labels_for_node.size(); ii++) {
+					// 	for (int jj = 0; jj < (int) partition_labels_for_node[0].size(); jj++) {
+					// 		for (int kk = 0; kk < (int) partition_labels_for_node[0][0].size(); kk++) {
+					// 			if (ii == 0 && jj == 0 && kk == 0) cout << "	    before broadcast label: " << log2(partitions_for_node[ii][jj].scale()) << ", " << \
+					// 				 seal_context.get_context_data(target_ct.parms_id())->total_coeff_modulus_bit_count() << endl;
+					// 			evaluator.mod_switch_to_inplace(partition_labels_for_node[ii][jj][kk], target_ct.parms_id());
+					// 			commu_size += partition_labels_for_node[ii][jj][kk].save(datastream);
+					// 		}
+					// 	}
+					// }
+
+					// cout << "	=== Communication size: " << commu_size << endl;
 					
 					if (d != depth_glb-1) { // no need to update the leaf level
 						update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
-												seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
-					}
-
-					if (d == depth_glb-1 && nd == 0) {
-						cout << "Final chain: " << seal_context.get_context_data(partition_labels_for_node[0][0][0].parms_id())->chain_index() << endl;
+													 seal_context, ckks_encoder, evaluator, relin_keys, gal_keys_rot);
 					}
 				}
 			}
@@ -235,10 +267,10 @@ int main() {
 				
 				// based on previous parent partition, threshold attribute value, each #data_size chunk record 
 				vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size());
-				vector<vector<Ciphertext>> partitions_for_node_squared((int) preprocessed_partitions.size());
 				vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
-				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node, partitions_for_node_squared,
-										partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
+				Ciphertext tmp_sel = selection_vector[sel_ind];
+				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node,
+										partition_labels_for_node, seal_context, tmp_sel, evaluator,
 										relin_keys, gal_keys_rot, !multi_thread);
 
 
@@ -247,6 +279,32 @@ int main() {
 
 				// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
 				// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
+				
+				
+				// stringstream datastream;
+				// uint64_t commu_size = 0;
+				// // cout << partitions_for_node.size() << ", " << partitions_for_node[0].size() << endl;
+				// // cout << partition_labels_for_node.size() << ", " << partition_labels_for_node[0].size() << ", " << partition_labels_for_node[0][0][0].size() << endl;
+				// for (int ii = 0; ii < (int) partitions_for_node.size(); ii++) {
+				// 	for (int jj = 0; jj < (int) partitions_for_node[0].size(); jj++) {
+				// 		if (ii == 0 && jj == 0) cout << "	    before broadcast data: " << log2(partitions_for_node[ii][jj].scale()) << endl;
+				// 		evaluator.mod_switch_to_inplace(partitions_for_node[ii][jj], target_ct.parms_id());
+				// 		commu_size += partitions_for_node[ii][jj].save(datastream);
+				// 	}
+				// }
+				// for (int ii = 0; ii < (int) partition_labels_for_node.size(); ii++) {
+				// 	for (int jj = 0; jj < (int) partition_labels_for_node[0].size(); jj++) {
+				// 		for (int kk = 0; kk < (int) partition_labels_for_node[0][0].size(); kk++) {
+				// 			if (ii == 0 && jj == 0 && kk == 0) cout << "	    before broadcast label: " << log2(partitions_for_node[ii][jj].scale()) << ", " << \
+				// 				 seal_context.get_context_data(target_ct.parms_id())->total_coeff_modulus_bit_count() << endl;
+				// 			evaluator.mod_switch_to_inplace(partition_labels_for_node[ii][jj][kk], target_ct.parms_id());
+				// 			commu_size += partition_labels_for_node[ii][jj][kk].save(datastream);
+				// 		}
+				// 	}
+				// }
+
+				// cout << "	=== Communication size: " << commu_size << endl;
+
 
 				if (d != depth_glb-1) { // no need to update the leaf level
 					update_selection_vector_ckks(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,

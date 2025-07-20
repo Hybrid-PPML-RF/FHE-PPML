@@ -337,14 +337,14 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
     // since for ckks, you need to rescale to next each time for whatever multiplication you perform, and cost 40 bits of noise
     // let the parties directly supply the form of preprocess_label, this will blow up the communication cost for the label part a little, but not much
     vector<Ciphertext> processed_labels;
-    if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
-        processed_labels.resize(label_size);
-        for (int i = 0; i < label_size; i++) {
-            processed_labels[i] = inputs_Y[0];
-        }
-    } else {
-        processed_labels = preprocess_label(context, inputs_Y, encryptor, evaluator, gal_keys);
-    }
+    // if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+    //     processed_labels.resize(label_size);
+    //     for (int i = 0; i < label_size; i++) {
+    //         processed_labels[i] = inputs_Y[0];
+    //     }
+    // } else {
+    processed_labels = preprocess_label(context, inputs_Y, encryptor, evaluator, gal_keys);
+    // }
     
     thread_chunk = max(1, (int)ceil((float) partitioned.size() / (float) num_cores));
     NTL_EXEC_RANGE(num_cores, first, last);
@@ -355,7 +355,7 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
                     for (int j = 0; j < label_size; j++) {
                         evaluator.multiply(partitioned[cnt][i], processed_labels[j], partitioned_labels[cnt][j][i]);
                         evaluator.relinearize_inplace(partitioned_labels[cnt][j][i], relin_keys);
-                        if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                        if (context.key_context_data()->parms().scheme() == scheme_type::ckks && log2(partitioned_labels[cnt][j][i].scale()) >= 60) {
                             evaluator.rescale_to_next_inplace(partitioned_labels[cnt][j][i]);
                         }
                     }
@@ -365,7 +365,7 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
                         evaluator.relinearize_inplace(partitioned_labels[cnt][j][(2*i-1)], relin_keys);
                         evaluator.multiply(partitioned[cnt][2*i], processed_labels[j], partitioned_labels[cnt][j][2*i]);
                         evaluator.relinearize_inplace(partitioned_labels[cnt][j][2*i], relin_keys);
-                        if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                        if (context.key_context_data()->parms().scheme() == scheme_type::ckks && log2(partitioned_labels[cnt][j][2*i].scale()) >= 60) {
                             evaluator.rescale_to_next_inplace(partitioned_labels[cnt][j][2*i-1]);
                             evaluator.rescale_to_next_inplace(partitioned_labels[cnt][j][2*i]);
                         }
@@ -388,19 +388,19 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
 void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partitions,
                                 vector<vector<vector<Ciphertext>>>& preprocessed_partitioned_labels,
                                 vector<vector<Ciphertext>>& partitions_for_node,
-                                vector<vector<Ciphertext>>& partitions_for_node_squared,
                                 vector<vector<vector<Ciphertext>>>& partition_labels_for_node, SEALContext& context, 
                                 Ciphertext& selection_vector, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys,
                                 bool multi_thread = false) {
 
     for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
         partitions_for_node[cnt].resize((int) preprocessed_partitions[cnt].size());
-        partitions_for_node_squared[cnt].resize((int) preprocessed_partitions[cnt].size());
     }
 
     for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt ++) {
         partition_labels_for_node[cnt].resize(label_size_glb, vector<Ciphertext>((int) preprocessed_partitioned_labels[0][0].size()));
     }
+
+    // multi_thread = false;
 
     if (multi_thread) {
         NTL::SetNumThreads(num_cores);
@@ -420,19 +420,29 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                     }
                     evaluator.multiply(tmp, selection_vector, partitions_for_node[cnt][i]);
                     evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
-                    if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                    if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partitions_for_node[cnt][i].scale()) > 60) {
+                        // if (cnt == 0 && i == 0) cout << "   Now switch for data1: " << log2(tmp.scale()) << ", " << log2(selection_vector.scale()) << ", " << context.get_context_data(partitions_for_node[cnt][i].parms_id())->chain_index() <<\
+                        //         ", " << log2(partitions_for_node[cnt][i].scale()) << " --> ";
                         evaluator.rescale_to_next_inplace(partitions_for_node[cnt][i]);
+                        // if (cnt == 0 && i == 0) cout << log2(partitions_for_node[cnt][i].scale()) << endl;
                     } else {
-                        evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
+                        // cout << "Skip first for data\n";
                     }
+                    //else {
+                    //     evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
+                    // }
                     partitions_for_node[cnt][i] = rotation_and_add(context, partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
 
-                    evaluator.multiply(partitions_for_node[cnt][i], partitions_for_node[cnt][i], partitions_for_node_squared[cnt][i]);
-                    evaluator.relinearize_inplace(partitions_for_node_squared[cnt][i], relin_keys);
-                    if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
-                        evaluator.rescale_to_next_inplace(partitions_for_node_squared[cnt][i]);
+                    evaluator.multiply_inplace(partitions_for_node[cnt][i], partitions_for_node[cnt][i]);
+                    evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
+                    if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partitions_for_node[cnt][i].scale()) > 60) {
+                        // if (cnt == 0 && i == 0) cout << "   Now switch for data2: " << log2(partitions_for_node[cnt][i].scale()) << " --> ";
+                        evaluator.rescale_to_next_inplace(partitions_for_node[cnt][i]);
+                        // if (cnt == 0 && i == 0) cout << log2(partitions_for_node[cnt][i].scale()) << endl;
+                        // cout << log2(partitions_for_node[cnt][i].scale()) << endl;
+                        // evaluator.mod_switch_to_inplace(partitions_for_node[cnt][i], context.last_parms_id());
                     } else {
-                        evaluator.mod_switch_to_next_inplace(partitions_for_node_squared[cnt][i]);
+                        evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
                     }
                 }
             }
@@ -441,7 +451,7 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
 
         // this bug is really something.... somehow if I have two different for loops inside this multi-thread, then the second for loop would have only one thread executing
         // the last chunk, i.e., for 4 cores, I would always have first = 3 for the second for loop, ridiculous!!!!
-        // so I split them into two separate thread pool, small overhead for spinning up the pool, but..... WHY????
+        // so I split them into two separate thread pool, small overhead for spinning up the pool, but..... WHY...
         NTL_EXEC_RANGE(num_cores, first, last);
         for (int tt = first; tt < last; tt++) {
             int end_2 = (tt == last-1) ? (int) preprocessed_partitioned_labels[0][0].size() : (tt+1) * thread_chunk_size_2;
@@ -457,15 +467,20 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
 
                         evaluator.multiply(tmp, selection_vector, partition_labels_for_node[cnt][l][i]);
                         evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
-                        if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                        if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partition_labels_for_node[cnt][l][i].scale()) > 60) {
+                            // if (cnt == 0 && i == 0 && l == 0) cout << "   Now switch for label1: " << log2(partition_labels_for_node[cnt][l][i].scale()) << " --> ";
                             evaluator.rescale_to_next_inplace(partition_labels_for_node[cnt][l][i]);
+                            // if (cnt == 0 && i == 0 && l == 0) cout << log2(partition_labels_for_node[cnt][l][i].scale()) << endl;
                         }
                         partition_labels_for_node[cnt][l][i] = rotation_and_add(context, partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
                         
                         evaluator.square_inplace(partition_labels_for_node[cnt][l][i]);
                         evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
-                        if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                        if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partition_labels_for_node[cnt][l][i].scale()) > 60) {
+                            // if (cnt == 0 && i == 0 && l == 0) cout << "   Now switch for label2: " << log2(partition_labels_for_node[cnt][l][i].scale()) << " --> ";
                             evaluator.rescale_to_next_inplace(partition_labels_for_node[cnt][l][i]);
+                            // if (cnt == 0 && i == 0 && l == 0) cout << log2(partition_labels_for_node[cnt][l][i].scale()) << endl;
+                            // evaluator.mod_switch_to_inplace(partition_labels_for_node[cnt][l][i], context.last_parms_id());
                         } else {
                             evaluator.mod_switch_to_next_inplace(partition_labels_for_node[cnt][l][i]);
                         }
@@ -483,22 +498,31 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                 } else {
                     evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
                 }
+
                 evaluator.multiply(tmp, selection_vector, partitions_for_node[cnt][i]);
                 evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
 
-                if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partitions_for_node[cnt][i].scale()) > 60) {
+                    // if (cnt == 0 && i == 0) cout << "   Now switch for data1: " << log2(tmp.scale()) << ", " << log2(selection_vector.scale()) << ", " << context.get_context_data(partitions_for_node[cnt][i].parms_id())->chain_index() <<\
+                    //      ", " << log2(partitions_for_node[cnt][i].scale()) << " --> ";
                     evaluator.rescale_to_next_inplace(partitions_for_node[cnt][i]);
-                } else {
-                    evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
+                    // if (cnt == 0 && i == 0) cout << log2(partitions_for_node[cnt][i].scale()) << endl;
                 }
+                // } else {
+                //     evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
+                // }
                 partitions_for_node[cnt][i] = rotation_and_add(context, partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
 
-                evaluator.multiply(partitions_for_node[cnt][i], partitions_for_node[cnt][i], partitions_for_node_squared[cnt][i]);
-                evaluator.relinearize_inplace(partitions_for_node_squared[cnt][i], relin_keys);
-                if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
-                    evaluator.rescale_to_next_inplace(partitions_for_node_squared[cnt][i]);
+                evaluator.multiply_inplace(partitions_for_node[cnt][i], partitions_for_node[cnt][i]);
+                evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
+                if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partitions_for_node[cnt][i].scale()) > 60) {
+                    // if (cnt == 0 && i == 0) cout << "   Now switch for data2: " << context.get_context_data(partitions_for_node[cnt][i].parms_id())->chain_index() <<\
+                    //      ", " << log2(partitions_for_node[cnt][i].scale()) << " --> ";
+                    evaluator.rescale_to_next_inplace(partitions_for_node[cnt][i]);
+                    // if (cnt == 0 && i == 0) cout << log2(partitions_for_node[cnt][i].scale()) << endl;
+                    // evaluator.mod_switch_to_inplace(partitions_for_node[cnt][i], context.last_parms_id());
                 } else {
-                    evaluator.mod_switch_to_next_inplace(partitions_for_node_squared[cnt][i]);
+                    evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
                 }
             }
         }
@@ -514,14 +538,25 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                     }
                     evaluator.multiply(tmp, selection_vector, partition_labels_for_node[cnt][l][i]);
                     evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
-                    partition_labels_for_node[cnt][l][i] = rotation_and_add(context, partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
-                    if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+
+                    if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partition_labels_for_node[cnt][l][i].scale()) > 60) {
+                        // if (cnt == 0 && i == 0) cout << "   Now switch for label1: " << context.get_context_data(partition_labels_for_node[cnt][l][i].parms_id())->chain_index() <<\
+                        //  ", " << log2(partition_labels_for_node[cnt][l][i].scale()) << " --> ";
                         evaluator.rescale_to_next_inplace(partition_labels_for_node[cnt][l][i]);
+                        // if (cnt == 0 && i == 0 && l == 0) cout << log2(partition_labels_for_node[cnt][l][i].scale()) << endl;
                     }
+                    partition_labels_for_node[cnt][l][i] = rotation_and_add(context, partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
+                    // if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                    //     evaluator.rescale_to_next_inplace(partition_labels_for_node[cnt][l][i]);
+                    // }
                     evaluator.square_inplace(partition_labels_for_node[cnt][l][i]);
                     evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
-                    if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
+                    if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partition_labels_for_node[cnt][l][i].scale()) > 60) {
+                        // if (cnt == 0 && i == 0) cout << "   Now switch for label2: " << context.get_context_data(partition_labels_for_node[cnt][l][i].parms_id())->chain_index() <<\
+                        //  ", " << log2(partition_labels_for_node[cnt][l][i].scale()) << " --> ";
                         evaluator.rescale_to_next_inplace(partition_labels_for_node[cnt][l][i]);
+                        // if (cnt == 0 && i == 0 && l == 0) cout << log2(partition_labels_for_node[cnt][l][i].scale()) << endl;
+                        // evaluator.mod_switch_to_inplace(partition_labels_for_node[cnt][l][i], context.last_parms_id());
                     } else {
                         evaluator.mod_switch_to_next_inplace(partition_labels_for_node[cnt][l][i]);
                     }
@@ -552,8 +587,12 @@ void update_selection_vector_ckks(vector<Ciphertext>& selection_vector, vector<v
     Plaintext extractor_pl;
     ckks_encoder.encode(extractor_msg, scale, extractor_pl);
 
+    // cout << "   --- inside update: " << \
+    //      context.get_context_data(preprocessed_partitions[threshold_attr_ind / attr_per_ct][threshold_val_ind + 1].parms_id())->chain_index() << ", " << \
+    //      context.get_context_data(selection_vector[parent_sel_ind].parms_id())->chain_index() << endl;
 
-    for (int i = 0; i < 2; i++) {
+
+    for (int i = 0; i < 2; i++) { // for left and right children
         evaluator.multiply_plain(preprocessed_partitions[threshold_attr_ind / attr_per_ct][threshold_val_ind + 1 - i%2],
                                  extractor_pl,
                                  threshold_data);
@@ -562,7 +601,7 @@ void update_selection_vector_ckks(vector<Ciphertext>& selection_vector, vector<v
         //     evaluator.rotate_rows_inplace(threshold_data, start_ind - poly_modulus_degree_glb/2, gal_keys);
         // }
         threshold_data = rotation_and_fill(context, threshold_data, data_size_glb * value_size_glb, evaluator, gal_keys);
-        evaluator.rescale_to_next_inplace(threshold_data);
+        // evaluator.rescale_to_next_inplace(threshold_data);
         if (context.get_context_data(threshold_data.parms_id())->chain_index() < context.get_context_data(selection_vector[parent_sel_ind].parms_id())->chain_index()) {
             evaluator.mod_switch_to_inplace(selection_vector[parent_sel_ind], threshold_data.parms_id());
         } else {
@@ -570,12 +609,26 @@ void update_selection_vector_ckks(vector<Ciphertext>& selection_vector, vector<v
         }
         
         evaluator.multiply(selection_vector[parent_sel_ind], threshold_data, selection_vector[child_sel_ind+i]);
+        // cout << "???? " << log2(selection_vector[parent_sel_ind].scale()) << ", " << log2(threshold_data.scale()) << ", " << \
+        //      log2(selection_vector[child_sel_ind+i].scale()) << endl;
         evaluator.relinearize_inplace(selection_vector[child_sel_ind+i], relin_keys);
 
-        evaluator.rescale_to_next_inplace(selection_vector[child_sel_ind+i]);
-        // cout << "Update chain: " << context.get_context_data(selection_vector[child_sel_ind+i].parms_id())->chain_index() \
-        //      << ", " << log2(selection_vector[child_sel_ind+i].scale()) << endl;
+        if (log2(selection_vector[child_sel_ind+i].scale()) > 60) {
+            // cout << "   Scale down at depth: " << cur_depth << ", update selection chain: " << \
+            //      context.get_context_data(selection_vector[child_sel_ind+i].parms_id())->chain_index() \
+            //      << ", " << log2(selection_vector[child_sel_ind+i].scale()) << " --> ";
+            evaluator.rescale_to_next_inplace(selection_vector[child_sel_ind+i]);
+            // cout << context.get_context_data(selection_vector[child_sel_ind+i].parms_id())->chain_index() \
+            //      << ", " << log2(selection_vector[child_sel_ind+i].scale()) << endl;
+        } else {
+            // cout << "   No scale down at depth: " << cur_depth << ", with " << \
+            //      context.get_context_data(selection_vector[child_sel_ind+i].parms_id())->chain_index() \
+            //      << ", " << log2(selection_vector[child_sel_ind+i].scale()) << endl;
+        }
     }
+    // if (cur_depth == depth_glb-1 && curr_node == 0) {
+    //     cout << "	Final selection chain: " << context.get_context_data(selection_vector[child_sel_ind].parms_id())->chain_index() << endl;
+    // }
 }
 
 
