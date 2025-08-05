@@ -32,9 +32,21 @@ int main() {
 	EncryptionParameters bfv_params(scheme_type::bfv);
 	bfv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
 
+
+	// for depth 4 or 5
 	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
 														60, 60, 60, 60, 60
 													});
+
+	// for depth 6 (or depth 5 for cancer)
+	// auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
+	// 													60, 30, 60, 60, 60, 60
+	// 												});
+
+	// for depth 6 of cancer
+	// auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
+	// 													60, 60, 60, 60, 60, 60
+	// 												});
 	bfv_params.set_coeff_modulus(coeff_modulus);
 	bfv_params.set_plain_modulus(p);
 
@@ -79,7 +91,7 @@ int main() {
 		if (i * data_size_glb < poly_modulus_degree_glb / 2) {
 			steps_rot.push_back(i * data_size_glb);
 		} else {
-			steps_rot.push_back(i * data_size_glb - poly_modulus_degree_glb / 2);
+			steps_rot.push_back((i * data_size_glb) % (poly_modulus_degree_glb / 2));
 		}
 	}
 	for (int i = data_size_glb; i > 0; i/=2) {
@@ -95,8 +107,8 @@ int main() {
     }
 	for (int i = 0; i < iter; i++) {
 		if (i * data_size_glb * value_size_glb < poly_modulus_degree_glb / 2) {
-			steps_rot.push_back(i * data_size_glb * value_size_glb);
-			steps_rot.push_back(-i * data_size_glb * value_size_glb);
+			steps_rot.push_back((i * data_size_glb * value_size_glb) % (poly_modulus_degree_glb/2));
+			steps_rot.push_back((-i * data_size_glb * value_size_glb) % (poly_modulus_degree_glb/2));
 		}
 	}
 	
@@ -130,7 +142,7 @@ int main() {
 	// vector<Ciphertext> test_ct(1);
 	// encryptor.encrypt(pl_test, test_ct[0]);
 
-	chrono::high_resolution_clock::time_point time_start, time_end;
+	chrono::high_resolution_clock::time_point time_start, time_end, sss, eee;
     time_start = chrono::high_resolution_clock::now();
 
 	vector<vector<Ciphertext>> preprocessed_partitions((int) inputs_X.size());
@@ -167,12 +179,25 @@ int main() {
 
 	// ideally, different nodes should have different partition thresholds, but just for some simulation...
 	int threshold_attr_ind = 1, threshold_val_ind = 1; 
-	update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, 0, 0,
-							seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
+	// update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, 0, 0,
+	// 						seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
+
+	vector<vector<vector<Ciphertext>>> partitions_for_node;
+	vector<vector<vector<vector<Ciphertext>>>> partition_labels_for_node;
 
 	time_start = chrono::high_resolution_clock::now();
-	for (int d = 1; d < depth_glb; d++) { // for each level in the tree, except the root
+	for (int d = 0; d < depth_glb-1; d++) { // for each level in the tree, except the root
 		bool multi_thread = pow(2,d) >= 4;
+
+		cout << "	Training for level " << d << " with " << pow(2,d) << " nodes...\n";
+
+		partitions_for_node.resize(pow(2,d));
+		partition_labels_for_node.resize(pow(2,d));
+
+		for (int ll = 0; ll < pow(2,d); ll++) {
+			partitions_for_node[ll].resize((int) preprocessed_partitions.size());
+			partition_labels_for_node[ll].resize((int) preprocessed_partitioned_labels.size());
+		}
 
 		if (multi_thread) {
 			NTL::SetNumThreads(num_cores);
@@ -186,14 +211,11 @@ int main() {
 					// based on previous parent partition, threshold attribute value, each #data_size chunk record 
 					// this step is used just for multiplying the newly updated selection vector
 					// sum up each data_size chunk to a single value, and then square it
-					vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size(),
-																   vector<Ciphertext>((int) preprocessed_partitions[0].size()));
-					vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
-					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node,
-											partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
+					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node[nd],
+											partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
 											relin_keys, gal_keys_rot, !multi_thread);
 
-					cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0]) << endl;
+					// cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << endl;
 
 					// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
 					// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
@@ -203,8 +225,7 @@ int main() {
 						update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
 												seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
 
-						
-						cout << "sel: " << d << " " << decryptor.invariant_noise_budget(selection_vector[2*(pow(2, d)-1 + nd) + 1]) << endl;
+						// cout << "sel: " << d << " " << decryptor.invariant_noise_budget(selection_vector[2*(pow(2, d)-1 + nd) + 1]) << endl;
 					}
 
 				}
@@ -215,16 +236,16 @@ int main() {
 				int sel_ind = pow(2, d)-1 + nd;
 				
 				// based on previous parent partition, threshold attribute value, each #data_size chunk record 
-				vector<vector<Ciphertext>> partitions_for_node((int) preprocessed_partitions.size());
-				vector<vector<vector<Ciphertext>>> partition_labels_for_node((int) preprocessed_partitioned_labels.size());
-				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node,
-										partition_labels_for_node, seal_context, selection_vector[sel_ind], evaluator,
+				
+				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node[nd],
+										partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
 										relin_keys, gal_keys_rot, !multi_thread);
 
-				cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0]) << endl;
+				// cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << endl;
 
 				// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
 				// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
+
 
 				if (d != depth_glb-1) { // no need to update the leaf level
 					update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
@@ -234,8 +255,63 @@ int main() {
 		}
 	}
 
+	// simulate the labeling for leaf nodes...
+	cout << "Calculating the labeling for leaf nodes...\n";
+	for (int i = 0; i < pow(2, depth_glb-1) / num_cores; i++) { // simulate the time of single thread
+		Ciphertext tmp = preprocessed_partitioned_labels[0][0][0];
+		if (selection_vector[selection_vector.size()-3].parms_id() != seal_context.last_parms_id()) {
+			evaluator.mod_switch_to_next_inplace(selection_vector[selection_vector.size()-3]);
+		}
+		evaluator.mod_switch_to_inplace(tmp, selection_vector[selection_vector.size()-3].parms_id());
+		evaluator.multiply_inplace(tmp, selection_vector[selection_vector.size()-3]);
+		if (i == 0) cout << "	" << decryptor.invariant_noise_budget(tmp) << endl;
+		evaluator.relinearize_inplace(tmp, relin_keys);
+		rotation_and_add(seal_context, tmp, data_size_glb, 1, evaluator, gal_keys_rot);
+	}
+
+	Plaintext pll;
+	pll.resize(poly_modulus_degree_glb);
+	pll.parms_id() = parms_id_zero;
+	for (int i = 0; i < (int) poly_modulus_degree_glb; i++) {
+		pll.data()[i] = 1;
+	}
+
+	cout << "Simulate the packing and extraction...\n";
+	for (int d = 0; d < depth_glb - 2; d++) { // simulate for all intermediary level
+		for (int k = 0; k < pow(2,d); k++) { // for all nodes
+			for (int i = 0; i < ceil((double) (attr_size_glb * (label_size_glb+1) * (2*value_size_glb-1)) / (double) num_cores); i++) { // simulate the single core runtime
+				Ciphertext tmp = partitions_for_node[0][0][0];
+				if (tmp.parms_id() != seal_context.last_parms_id()) {
+					evaluator.mod_switch_to_next_inplace(tmp);
+				}
+				evaluator.multiply_plain_inplace(tmp, pll);
+				evaluator.rotate_rows_inplace(tmp, 1, gal_keys_rot);
+				evaluator.add_inplace(tmp, tmp);
+			}
+		}
+	}
+
+	for (int d = 0; d < depth_glb - 2; d++) { // simulate for all intermediary level
+		for (int k = 0; k < pow(2,d); k++) { // for all nodes
+			for (int i = 0; i < ceil((double) label_size_glb / (double) num_cores); i++) { // simulate the single core runtime
+				Ciphertext tmp = partition_labels_for_node[0][0][0][0];
+				if (tmp.parms_id() != seal_context.last_parms_id()) {
+					evaluator.mod_switch_to_next_inplace(tmp);
+				}
+				evaluator.multiply_plain_inplace(tmp, pll);
+				evaluator.rotate_rows_inplace(tmp, 1, gal_keys_rot);
+				evaluator.add_inplace(tmp, tmp);
+
+				if (d == 0 && k == 0 && i == 0) cout << "	Left noise budget: " << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << ", "
+				 << decryptor.invariant_noise_budget(tmp) << ", " << tmp.coeff_modulus_size() << endl;
+			}
+		}
+	}
+
+
 	time_end = chrono::high_resolution_clock::now();
-	cout << "Re-partition the data for all nodes time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
+	cout << "Training + labeling + packing total runtime: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
+		
 
 
 	return 0;

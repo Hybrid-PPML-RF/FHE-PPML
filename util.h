@@ -25,13 +25,13 @@ Ciphertext rotation_and_fill(SEALContext& context, Ciphertext& input, int length
             if (step > poly_modulus_degree_glb / 2) {
                 evaluator.rotate_vector(output, data_size_glb, rot_keys, tmp); // simulation step size... buggy
             } else {
-                evaluator.rotate_vector(output, -step, rot_keys, tmp);
+                evaluator.rotate_vector(output, (step) % (poly_modulus_degree_glb/2), rot_keys, tmp);
             }
         } else {
             if (step > poly_modulus_degree_glb / 2) {
                 evaluator.rotate_rows(output, data_size_glb, rot_keys, tmp); // simulation step size... buggy
             } else {
-                evaluator.rotate_rows(output, -step, rot_keys, tmp);
+                evaluator.rotate_rows(output, (step) % (poly_modulus_degree_glb/2), rot_keys, tmp);
             }
         }
         evaluator.add_inplace(output, tmp);
@@ -68,14 +68,14 @@ Ciphertext rotation_and_add(SEALContext& context, Ciphertext& input, int length,
             }
             evaluator.add_inplace(output, tmp1);
         } else {
-            evaluator.rotate_rows(output, step+offset, rot_keys, tmp1);
+            evaluator.rotate_rows(output, (step+offset) % (poly_modulus_degree_glb/2), rot_keys, tmp1);
             if (iter % 2) {
                 step = (iter - 1) * chunk_size;
                 if (!carry_over_init) {
-                    evaluator.rotate_rows(output, step+offset, rot_keys, carry_over);
+                    evaluator.rotate_rows(output, (step+offset) % (poly_modulus_degree_glb/2), rot_keys, carry_over);
                     carry_over_init = true;
                 } else {
-                    evaluator.rotate_rows(output, step+offset, rot_keys, tmp2);
+                    evaluator.rotate_rows(output, (step+offset) % (poly_modulus_degree_glb/2), rot_keys, tmp2);
                     evaluator.add_inplace(carry_over, tmp2);
                 }
             }
@@ -325,7 +325,7 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
                     if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
                         evaluator.rotate_vector_inplace(partitioned[cnt][2*i], data_size * i, gal_keys);
                     } else {
-                        evaluator.rotate_rows_inplace(partitioned[cnt][2*i], data_size * i, gal_keys);
+                        evaluator.rotate_rows_inplace(partitioned[cnt][2*i], (data_size * i)%(poly_modulus_degree_glb/2), gal_keys);
                     }
                 }
             }
@@ -660,7 +660,7 @@ void update_selection_vector(vector<Ciphertext>& selection_vector, vector<vector
                                  threshold_data);
         if (start_ind > poly_modulus_degree_glb / 2) {
             evaluator.rotate_columns_inplace(threshold_data, gal_keys);
-            evaluator.rotate_rows_inplace(threshold_data, start_ind - poly_modulus_degree_glb/2, gal_keys);
+            evaluator.rotate_rows_inplace(threshold_data, (start_ind - poly_modulus_degree_glb/2) % (poly_modulus_degree_glb/2), gal_keys);
         }
         threshold_data = rotation_and_fill(context, threshold_data, data_size_glb * value_size_glb, evaluator, gal_keys);
         evaluator.mod_switch_to_inplace(threshold_data, selection_vector[parent_sel_ind].parms_id());
@@ -672,3 +672,15 @@ void update_selection_vector(vector<Ciphertext>& selection_vector, vector<vector
         }
     }
 }
+
+
+// vector<Ciphertext> extract_and_pack(vector<vector<Ciphertext>>& partitions_for_node, 
+//                                     vector<vector<vector<Ciphertext>>>&partition_labels_for_node,
+//                                     Evaluator& evaluator, bool multi_thread) {
+    
+//     int num_of_ct = ceil(double (2 * attr_size_glb * value_size_glb * (label_size_glb + 1))/(double) poly_modulus_degree_glb);
+
+//     vector<Ciphertext> results(num_of_ct);
+
+
+// }

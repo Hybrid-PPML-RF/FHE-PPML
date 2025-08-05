@@ -43,6 +43,6 @@ include_directories( ${OPENMP_INCLUDES} )
 ###     link_libraries( ${PALISADE_SHARED_LIBRARIES} )
 ### endif()
 
-add_executable( ppml main_ckks.cpp )
+add_executable( ppml main.cpp )
 
 target_link_libraries(ppml SEAL::seal ntl m gmp)
