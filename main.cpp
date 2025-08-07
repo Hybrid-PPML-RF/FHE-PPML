@@ -43,10 +43,6 @@ int main() {
 	// 													60, 30, 60, 60, 60, 60
 	// 												});
 
-	// for depth 6 of cancer
-	// auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
-	// 													60, 60, 60, 60, 60, 60
-	// 												});
 	bfv_params.set_coeff_modulus(coeff_modulus);
 	bfv_params.set_plain_modulus(p);
 
@@ -186,7 +182,7 @@ int main() {
 	vector<vector<vector<vector<Ciphertext>>>> partition_labels_for_node;
 
 	time_start = chrono::high_resolution_clock::now();
-	for (int d = 0; d < depth_glb-1; d++) { // for each level in the tree, except the root
+	for (int d = 0; d < depth_glb; d++) { // for each level in the tree, except the root
 		bool multi_thread = pow(2,d) >= 4;
 
 		cout << "	Training for level " << d << " with " << pow(2,d) << " nodes...\n";
@@ -211,9 +207,15 @@ int main() {
 					// based on previous parent partition, threshold attribute value, each #data_size chunk record 
 					// this step is used just for multiplying the newly updated selection vector
 					// sum up each data_size chunk to a single value, and then square it
-					perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node[nd],
-											partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
-											relin_keys, gal_keys_rot, !multi_thread);
+					vector<vector<Ciphertext>> random_preprocessed_partitions;
+					vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
+					simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels, 
+														   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
+														   seal_context, evaluator, gal_keys_rot, !multi_thread);
+
+					perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
+											   partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
+											   relin_keys, gal_keys_rot, !multi_thread);
 
 					// cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << endl;
 
@@ -236,10 +238,17 @@ int main() {
 				int sel_ind = pow(2, d)-1 + nd;
 				
 				// based on previous parent partition, threshold attribute value, each #data_size chunk record 
-				
-				perform_partition_for_node(preprocessed_partitions, preprocessed_partitioned_labels, partitions_for_node[nd],
+				vector<vector<Ciphertext>> random_preprocessed_partitions;
+				vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
+				simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels, 
+													   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
+													   seal_context, evaluator, gal_keys_rot, !multi_thread);
+													   
+				perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
 										partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
 										relin_keys, gal_keys_rot, !multi_thread);
+
+				
 
 				// cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << endl;
 
@@ -279,7 +288,7 @@ int main() {
 	cout << "Simulate the packing and extraction...\n";
 	for (int d = 0; d < depth_glb - 2; d++) { // simulate for all intermediary level
 		for (int k = 0; k < pow(2,d); k++) { // for all nodes
-			for (int i = 0; i < ceil((double) (attr_size_glb * (label_size_glb+1) * (2*value_size_glb-1)) / (double) num_cores); i++) { // simulate the single core runtime
+			for (int i = 0; i < ceil((double) (sqrt_attr_size_glb * (label_size_glb+1) * (2*value_size_glb-1)) / (double) num_cores); i++) { // simulate the single core runtime
 				Ciphertext tmp = partitions_for_node[0][0][0];
 				if (tmp.parms_id() != seal_context.last_parms_id()) {
 					evaluator.mod_switch_to_next_inplace(tmp);
