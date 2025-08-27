@@ -22,7 +22,46 @@ A: total number of attributes
 
  */
 
-int main() {
+int main(int argc, char* argv[]) {
+
+	int dataset = std::stoi(argv[1]);
+	int is_sqrt = std::stoi(argv[4]);
+
+	// default as iris
+	if (dataset == 1) {
+		data_size_glb = 100; 
+		attr_size_glb = 4; 
+		sqrt_attr_size_glb = is_sqrt ? 2 : 4; 
+		value_size_glb = 8;
+		label_size_glb = 3; 
+	} else if (dataset == 2) { // wine
+		data_size_glb = 119; 
+		attr_size_glb = 13; 
+		sqrt_attr_size_glb = is_sqrt ? 4 : 13; 
+		value_size_glb = 9; 
+		label_size_glb = 3; 
+	} else if (dataset == 3) { // cancer
+		data_size_glb = 380;
+		attr_size_glb = 30;
+		sqrt_attr_size_glb = is_sqrt ? 6 : 30;
+		value_size_glb = 18;
+		label_size_glb = 2;
+	} else { // digit
+		data_size_glb = 1203;
+		attr_size_glb = 64;
+		sqrt_attr_size_glb = is_sqrt ? 8 : 64; 
+		value_size_glb = 17;
+		label_size_glb = 10;	
+	}
+
+	depth_glb = std::stoi(argv[2]);
+
+	int is_bin = std::stoi(argv[3]);
+	if (is_bin) {
+		value_size_glb = 8;
+	}
+
+
 	for (auto &i : seed_glb) {
 		i = random_uint64();
 	}
@@ -32,16 +71,15 @@ int main() {
 	EncryptionParameters bfv_params(scheme_type::bfv);
 	bfv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
 
-
-	// for depth 4 or 5
 	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
 														60, 60, 60, 60, 60
 													});
 
-	// for depth 6 (or depth 5 for cancer)
-	// auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
-	// 													60, 30, 60, 60, 60, 60
-	// 												});
+	if (dataset == 4 && depth_glb == 6) {
+		auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
+															60, 30, 60, 60, 60, 60
+														});
+	}
 
 	bfv_params.set_coeff_modulus(coeff_modulus);
 	bfv_params.set_plain_modulus(p);
@@ -273,7 +311,7 @@ int main() {
 		}
 		evaluator.mod_switch_to_inplace(tmp, selection_vector[selection_vector.size()-3].parms_id());
 		evaluator.multiply_inplace(tmp, selection_vector[selection_vector.size()-3]);
-		if (i == 0) cout << "	" << decryptor.invariant_noise_budget(tmp) << endl;
+		// if (i == 0) cout << "	" << decryptor.invariant_noise_budget(tmp) << endl;
 		evaluator.relinearize_inplace(tmp, relin_keys);
 		rotation_and_add(seal_context, tmp, data_size_glb, 1, evaluator, gal_keys_rot);
 	}
@@ -311,8 +349,8 @@ int main() {
 				evaluator.rotate_rows_inplace(tmp, 1, gal_keys_rot);
 				evaluator.add_inplace(tmp, tmp);
 
-				if (d == 0 && k == 0 && i == 0) cout << "	Left noise budget: " << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << ", "
-				 << decryptor.invariant_noise_budget(tmp) << ", " << tmp.coeff_modulus_size() << endl;
+				// if (d == 0 && k == 0 && i == 0) cout << "	Left noise budget: " << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << ", "
+				//  << decryptor.invariant_noise_budget(tmp) << ", " << tmp.coeff_modulus_size() << endl;
 			}
 		}
 	}
