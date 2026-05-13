@@ -26,6 +26,8 @@ find_package(SEAL REQUIRED)
 ### set( CMAKE_CXX_FLAGS ${PALISADE_CXX_FLAGS} )
 
 include_directories( ${OPENMP_INCLUDES} )
+include_directories( /opt/homebrew/include )
+link_directories( /opt/homebrew/lib )
 ### include_directories( ${PALISADE_INCLUDE} )
 ### include_directories( ${PALISADE_INCLUDE}/third-party/include )
 ### include_directories( ${PALISADE_INCLUDE}/core )
@@ -44,5 +46,13 @@ include_directories( ${OPENMP_INCLUDES} )
 ### endif()
 
 add_executable( ppml main.cpp )
+target_link_libraries(ppml SEAL::seal_shared ntl m gmp)
 
-target_link_libraries(ppml SEAL::seal ntl m gmp)
+add_executable( benchmark benchmark.cpp )
+target_link_libraries(benchmark SEAL::seal_shared ntl m gmp)
+
+add_executable( microbench microbench.cpp )
+target_link_libraries(microbench SEAL::seal_shared)
+
+add_executable( microbench_bfv microbench_bfv.cpp )
+target_link_libraries(microbench_bfv SEAL::seal_shared)

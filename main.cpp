@@ -68,21 +68,22 @@ int main(int argc, char* argv[]) {
 
 	int p = 65537;
 
-	EncryptionParameters bfv_params(scheme_type::bfv);
-	bfv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
+	EncryptionParameters bgv_params(scheme_type::bgv);
+	bgv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
 
-	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
-														60, 60, 60, 60, 60
-													});
+	// BGV modulus chain: first prime is the base (level 0, always retained).
+	// Middle 40-bit primes are consumed one-per-multiply via mod_switch_to_next_inplace.
+	// Level budget: 1 (preprocess) + depth_glb (updates) + 2 (perform_partition)
+	//             + 2 (labeling+packing) + 1 (mat-vec multiply) = depth_glb + 6 levels needed.
+	// Using depth_glb + 7 middle primes (depth_glb + 9 primes total) for one level of margin.
+	int num_middle = depth_glb + (int)(pow(2, depth_glb - 1) / num_cores) + 6;
+	vector<int> mod_bits = {60};
+	for (int i = 0; i < num_middle; i++) mod_bits.push_back(40);
+	mod_bits.push_back(60);
+	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, mod_bits);
 
-	if (dataset == 4 && depth_glb == 6) {
-		auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
-															60, 30, 60, 60, 60, 60
-														});
-	}
-
-	bfv_params.set_coeff_modulus(coeff_modulus);
-	bfv_params.set_plain_modulus(p);
+	bgv_params.set_coeff_modulus(coeff_modulus);
+	bgv_params.set_plain_modulus(p);
 
 
 	prng_seed_type seed;
@@ -90,25 +91,25 @@ int main(int argc, char* argv[]) {
 		i = random_uint64();
 	}
 	auto rng = make_shared<Blake2xbPRNGFactory>(Blake2xbPRNGFactory(seed));
-	bfv_params.set_random_generator(rng);
+	bgv_params.set_random_generator(rng);
 
 
-	SEALContext seal_context(bfv_params, true, sec_level_type::none);
+	SEALContext seal_context(bgv_params, true, sec_level_type::none);
 	primitive_root = seal_context.first_context_data()->plain_ntt_tables()->get_root();
 
 	KeyGenerator keygen(seal_context);
-	SecretKey bfv_secret_key = keygen.secret_key();
+	SecretKey bgv_secret_key = keygen.secret_key();
 
-	PublicKey bfv_public_key;
-	keygen.create_public_key(bfv_public_key);
+	PublicKey bgv_public_key;
+	keygen.create_public_key(bgv_public_key);
 
-	RelinKeys relin_keys, relin_keys_raise;
+	RelinKeys relin_keys;
 	keygen.create_relin_keys(relin_keys);
 
-	Encryptor encryptor(seal_context, bfv_public_key);
+	Encryptor encryptor(seal_context, bgv_public_key);
 	Evaluator evaluator(seal_context);
 	BatchEncoder batch_encoder(seal_context);
-	Decryptor decryptor(seal_context, bfv_secret_key);
+	Decryptor decryptor(seal_context, bgv_secret_key);
 
 	GaloisKeys gal_keys, gal_keys_rot;
 
@@ -302,6 +303,31 @@ int main(int argc, char* argv[]) {
 		}
 	}
 
+	// ── homomorphic vector-to-matrix multiplication after the depth loop ────────
+	// inputs_Y[0] packs matrix M: column l occupies slots [l*data_size_glb, (l+1)*data_size_glb).
+	// vec_ct packs vector v: v[l] is replicated in all slots of column l's range.
+	// result[j] = sum_{l=0}^{label_size_glb-1}  M[j][l] * v[l],  at output slots [0, data_size_glb).
+	{
+		// Build fresh vector ciphertext with v[l] replicated in column-l's slot range.
+		vector<uint64_t> v_msg(poly_modulus_degree_glb, 0);
+		for (int l = 0; l < label_size_glb; l++) {
+			uint64_t val = (uint64_t)(l + 1); // placeholder values; supplied via MPC in practice
+			for (int j = 0; j < data_size_glb; j++)
+				v_msg[l * data_size_glb + j] = val;
+		}
+		Plaintext v_plain;
+		batch_encoder.encode(v_msg, v_plain);
+		Ciphertext vec_ct;
+		encryptor.encrypt(v_plain, vec_ct);
+
+		Ciphertext matvec_result = ct_matvec_bgv(vec_ct, inputs_Y[0],
+		                                          seal_context, evaluator,
+		                                          relin_keys, gal_keys_rot,
+		                                          data_size_glb, label_size_glb);
+		cout << "Mat-vec multiply done. Remaining modulus levels: "
+		     << seal_context.get_context_data(matvec_result.parms_id())->chain_index() << "\n";
+	}
+
 	// simulate the labeling for leaf nodes...
 	cout << "Calculating the labeling for leaf nodes...\n";
 	for (int i = 0; i < pow(2, depth_glb-1) / num_cores; i++) { // simulate the time of single thread
@@ -313,6 +339,7 @@ int main(int argc, char* argv[]) {
 		evaluator.multiply_inplace(tmp, selection_vector[selection_vector.size()-3]);
 		// if (i == 0) cout << "	" << decryptor.invariant_noise_budget(tmp) << endl;
 		evaluator.relinearize_inplace(tmp, relin_keys);
+		evaluator.mod_switch_to_next_inplace(tmp);  // BGV: mod down after CT×CT multiply
 		rotation_and_add(seal_context, tmp, data_size_glb, 1, evaluator, gal_keys_rot);
 	}
 
