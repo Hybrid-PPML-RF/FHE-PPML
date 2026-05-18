@@ -357,6 +357,8 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
                         evaluator.relinearize_inplace(partitioned_labels[cnt][j][i], relin_keys);
                         if (context.key_context_data()->parms().scheme() == scheme_type::ckks && log2(partitioned_labels[cnt][j][i].scale()) >= 60) {
                             evaluator.rescale_to_next_inplace(partitioned_labels[cnt][j][i]);
+                        } else {
+                            evaluator.mod_switch_to_next_inplace(partitioned_labels[cnt][j][i]);
                         }
                     }
                 } else {
@@ -368,6 +370,9 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
                         if (context.key_context_data()->parms().scheme() == scheme_type::ckks && log2(partitioned_labels[cnt][j][2*i].scale()) >= 60) {
                             evaluator.rescale_to_next_inplace(partitioned_labels[cnt][j][2*i-1]);
                             evaluator.rescale_to_next_inplace(partitioned_labels[cnt][j][2*i]);
+                        } else {
+                            evaluator.mod_switch_to_next_inplace(partitioned_labels[cnt][j][2*i-1]);
+                            evaluator.mod_switch_to_next_inplace(partitioned_labels[cnt][j][2*i]);
                         }
                     }
                 }
@@ -431,7 +436,6 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                     //else {
                     //     evaluator.mod_switch_to_next_inplace(partitions_for_node[cnt][i]);
                     // }
-                    partitions_for_node[cnt][i] = rotation_and_add(context, partitions_for_node[cnt][i], data_size_glb, 1, evaluator, gal_keys, 0);
 
                     // evaluator.multiply_inplace(partitions_for_node[cnt][i], partitions_for_node[cnt][i]);
                     // evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
@@ -472,8 +476,7 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                             evaluator.rescale_to_next_inplace(partition_labels_for_node[cnt][l][i]);
                             // if (cnt == 0 && i == 0 && l == 0) cout << log2(partition_labels_for_node[cnt][l][i].scale()) << endl;
                         }
-                        partition_labels_for_node[cnt][l][i] = rotation_and_add(context, partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
-                        
+                            
                         // evaluator.square_inplace(partition_labels_for_node[cnt][l][i]);
                         // evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
                         if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partition_labels_for_node[cnt][l][i].scale()) > 60) {
@@ -548,7 +551,6 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                         evaluator.rescale_to_next_inplace(partition_labels_for_node[cnt][l][i]);
                         // if (cnt == 0 && i == 0 && l == 0) cout << log2(partition_labels_for_node[cnt][l][i].scale()) << endl;
                     }
-                    partition_labels_for_node[cnt][l][i] = rotation_and_add(context, partition_labels_for_node[cnt][l][i], data_size_glb, 1, evaluator, gal_keys, 0);
                     // if (context.key_context_data()->parms().scheme() == scheme_type::ckks) {
                     //     evaluator.rescale_to_next_inplace(partition_labels_for_node[cnt][l][i]);
                     // }
@@ -670,9 +672,7 @@ void update_selection_vector(vector<Ciphertext>& selection_vector, vector<vector
         evaluator.multiply(selection_vector[parent_sel_ind], threshold_data, selection_vector[child_sel_ind+i]);
         evaluator.relinearize_inplace(selection_vector[child_sel_ind+i], relin_keys);
 
-        if ((cur_depth % 2) == 0 && cur_depth != 0) {
-            evaluator.mod_switch_to_next_inplace(selection_vector[child_sel_ind+i]);           
-        }
+        evaluator.mod_switch_to_next_inplace(selection_vector[child_sel_ind+i]);
     }
 }
 
