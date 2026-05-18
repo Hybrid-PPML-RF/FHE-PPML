@@ -44,5 +44,7 @@ include_directories( ${OPENMP_INCLUDES} )
 ### endif()
 
 add_executable( ppml main.cpp )
+target_link_libraries(ppml SEAL::seal_shared /opt/homebrew/lib/libntl.dylib m /opt/homebrew/lib/libgmp.dylib)
 
-target_link_libraries(ppml SEAL::seal ntl m gmp)
+add_executable( benchmark benchmark.cpp )
+target_link_libraries(benchmark SEAL::seal_shared)
