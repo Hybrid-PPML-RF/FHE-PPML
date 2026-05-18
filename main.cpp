@@ -7,6 +7,16 @@
 #include <NTL/BasicThreadPool.h>
 #include <NTL/ZZ.h>
 #include <thread>
+#include <iomanip>
+#include <mach/mach.h>
+
+static void print_rss(const char* label) {
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
+        printf("[MEM] %s: RSS=%.1f GB\n", label, (double)info.resident_size / (1024.0*1024.0*1024.0));
+    }
+}
 
 using namespace seal;
 using namespace std;
@@ -22,45 +32,52 @@ A: total number of attributes
 
  */
 
-int main(int argc, char* argv[]) {
+struct RunResult {
+	string name;
+	long long preprocess_us;
+	long long train_us;
+};
 
-	int dataset = std::stoi(argv[1]);
-	int is_sqrt = std::stoi(argv[4]);
+RunResult run_dataset(int dataset, int depth, int is_bin, int is_sqrt) {
 
-	// default as iris
+	setvbuf(stdout, nullptr, _IONBF, 0); // unbuffer C stdio so output is visible even if killed
+
+	string ds_name;
 	if (dataset == 1) {
-		data_size_glb = 100; 
-		attr_size_glb = 4; 
-		sqrt_attr_size_glb = is_sqrt ? 2 : 4; 
+		ds_name = "iris";
+		data_size_glb = 100;
+		attr_size_glb = 4;
+		sqrt_attr_size_glb = is_sqrt ? 2 : 4;
 		value_size_glb = 8;
-		label_size_glb = 3; 
+		label_size_glb = 3;
 	} else if (dataset == 2) { // wine
-		data_size_glb = 119; 
-		attr_size_glb = 13; 
-		sqrt_attr_size_glb = is_sqrt ? 4 : 13; 
-		value_size_glb = 9; 
-		label_size_glb = 3; 
+		ds_name = "wine";
+		data_size_glb = 119;
+		attr_size_glb = 13;
+		sqrt_attr_size_glb = is_sqrt ? 4 : 13;
+		value_size_glb = 9;
+		label_size_glb = 3;
 	} else if (dataset == 3) { // cancer
+		ds_name = "cancer";
 		data_size_glb = 380;
 		attr_size_glb = 30;
 		sqrt_attr_size_glb = is_sqrt ? 6 : 30;
 		value_size_glb = 18;
 		label_size_glb = 2;
 	} else { // digit
+		ds_name = "digit";
 		data_size_glb = 1203;
 		attr_size_glb = 64;
-		sqrt_attr_size_glb = is_sqrt ? 8 : 64; 
+		sqrt_attr_size_glb = is_sqrt ? 8 : 64;
 		value_size_glb = 17;
-		label_size_glb = 10;	
+		label_size_glb = 10;
 	}
 
-	depth_glb = std::stoi(argv[2]);
+	depth_glb = depth;
+	if (is_bin) value_size_glb = 8;
 
-	int is_bin = std::stoi(argv[3]);
-	if (is_bin) {
-		value_size_glb = 8;
-	}
-
+	cout << "\n=== Dataset: " << ds_name << "  depth=" << depth
+	     << "  data_size=" << data_size_glb << "  label_size=" << label_size_glb << " ===\n";
 
 	for (auto &i : seed_glb) {
 		i = random_uint64();
@@ -73,10 +90,13 @@ int main(int argc, char* argv[]) {
 
 	// BGV modulus chain: first prime is the base (level 0, always retained).
 	// Middle 40-bit primes are consumed one-per-multiply via mod_switch_to_next_inplace.
-	// Level budget: 1 (preprocess) + depth_glb (updates) + 2 (perform_partition)
-	//             + 2 (labeling+packing) + 1 (mat-vec multiply) = depth_glb + 6 levels needed.
-	// Using depth_glb + 7 middle primes (depth_glb + 9 primes total) for one level of margin.
-	int num_middle = depth_glb + (int)(pow(2, depth_glb - 1) / num_cores) + 6;
+	// Level budget breakdown:
+	//   depth_glb        : update_selection_vector calls (one per depth)
+	//   leaf_iter        : leaf-labeling loop mod-switches selection_vector in-place each iteration
+	//                      leaf_iter = pow(2, depth_glb-1) / num_cores
+	//   6                : 1 (preprocess) + 2 (perform_partition) + 1 (mat-vec) + 2 (margin)
+	int leaf_iter = (int)(pow(2, depth_glb - 1) / num_cores);
+	int num_middle = depth_glb + leaf_iter + 6;
 	vector<int> mod_bits = {60};
 	for (int i = 0; i < num_middle; i++) mod_bits.push_back(40);
 	mod_bits.push_back(60);
@@ -85,6 +105,19 @@ int main(int argc, char* argv[]) {
 	bgv_params.set_coeff_modulus(coeff_modulus);
 	bgv_params.set_plain_modulus(p);
 
+	// Print coeff modulus configuration
+	{
+		int total_bits = 0;
+		for (auto& m : coeff_modulus) total_bits += m.bit_count();
+		cout << "Coeff modulus: " << coeff_modulus.size() << " primes, "
+		     << total_bits << " bits total  [";
+		for (size_t i = 0; i < coeff_modulus.size(); i++) {
+			cout << coeff_modulus[i].bit_count();
+			if (i + 1 < coeff_modulus.size()) cout << ", ";
+		}
+		cout << "]\n";
+		cout << "Modulus levels: " << (coeff_modulus.size() - 1) << "\n";
+	}
 
 	prng_seed_type seed;
 	for (auto &i : seed) {
@@ -92,7 +125,6 @@ int main(int argc, char* argv[]) {
 	}
 	auto rng = make_shared<Blake2xbPRNGFactory>(Blake2xbPRNGFactory(seed));
 	bgv_params.set_random_generator(rng);
-
 
 	SEALContext seal_context(bgv_params, true, sec_level_type::none);
 	primitive_root = seal_context.first_context_data()->plain_ntt_tables()->get_root();
@@ -114,16 +146,16 @@ int main(int argc, char* argv[]) {
 	GaloisKeys gal_keys, gal_keys_rot;
 
 	vector<int> stepsfirst = {0, 1};
-	for (int i = 0; i < log2(poly_modulus_degree_glb/2); i++) {
+	for (int i = 0; i < (int)log2(poly_modulus_degree_glb/2); i++) {
 		stepsfirst.push_back(-(1<<i));
 		stepsfirst.push_back((1<<i));
 	}
 	keygen.create_galois_keys(stepsfirst, gal_keys);
 
-	// for preparing all threshlold values, rotation and addition
+	// for preparing all threshold values, rotation and addition
 	vector<int> steps_rot = {0, 1};
 	for (int i = 0; i < 2*value_size_glb; i++) {
-		if (i * data_size_glb < poly_modulus_degree_glb / 2) {
+		if (i * data_size_glb < (int)poly_modulus_degree_glb / 2) {
 			steps_rot.push_back(i * data_size_glb);
 		} else {
 			steps_rot.push_back((i * data_size_glb) % (poly_modulus_degree_glb / 2));
@@ -137,18 +169,18 @@ int main(int argc, char* argv[]) {
 	}
 
 	int iter = 1;
-    while (iter < attr_size_glb) { // round it to a power of 2
-        iter *= 2;
-    }
+	while (iter < attr_size_glb) { // round it to a power of 2
+		iter *= 2;
+	}
 	for (int i = 0; i < iter; i++) {
-		if (i * data_size_glb * value_size_glb < poly_modulus_degree_glb / 2) {
+		if (i * data_size_glb * value_size_glb < (int)poly_modulus_degree_glb / 2) {
 			steps_rot.push_back((i * data_size_glb * value_size_glb) % (poly_modulus_degree_glb/2));
 			steps_rot.push_back((-i * data_size_glb * value_size_glb) % (poly_modulus_degree_glb/2));
 		}
 	}
-	
 
 	keygen.create_galois_keys(steps_rot, gal_keys_rot);
+	print_rss("after galois keys");
 
 	Plaintext pl_test, all_ones;
 	vector<uint64_t> msg_test(poly_modulus_degree_glb);
@@ -156,29 +188,16 @@ int main(int argc, char* argv[]) {
 	vector<uint64_t> allones(poly_modulus_degree_glb, 1);
 	batch_encoder.encode(allones, all_ones);
 
-
 	///////////////////////////////////////////// prepare the one-hot encoding for datasets /////////////////////////////////////////////
 
 	vector<Ciphertext> inputs_X, inputs_Y;
 	sample_one_hot_encoding_inputs(inputs_X, inputs_Y, data_size_glb, attr_size_glb, value_size_glb, label_size_glb,
 								   batch_encoder, encryptor);
 
-	
+	///////////////////////// pre-process the dataset by recording all partition labels based on attr val ////////////////////////////////
 
-	///////////////////////// pre-process the dataset by recording all parition labels based on attr val ////////////////////////////////
-	
-	// for (int i = 0; i < (int) poly_modulus_degree_glb; i++) {
-	// 	msg_test[i] = 0;
-	// }
-	// for (int i = 0; i < (int) 20; i++) {
-	// 	msg_test[i] = 1;
-	// }
-	// batch_encoder.encode(msg_test, pl_test);
-	// vector<Ciphertext> test_ct(1);
-	// encryptor.encrypt(pl_test, test_ct[0]);
-
-	chrono::high_resolution_clock::time_point time_start, time_end, sss, eee;
-    time_start = chrono::high_resolution_clock::now();
+	chrono::high_resolution_clock::time_point time_start, time_end;
+	time_start = chrono::high_resolution_clock::now();
 
 	vector<vector<Ciphertext>> preprocessed_partitions((int) inputs_X.size());
 	vector<vector<vector<Ciphertext>>> preprocessed_partitioned_labels((int) inputs_X.size());
@@ -187,25 +206,12 @@ int main(int argc, char* argv[]) {
 							 seal_context, evaluator, encryptor, gal_keys_rot, relin_keys);
 
 	time_end = chrono::high_resolution_clock::now();
-	cout << "Preprocess time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
-
-	
-
-	// Ciphertext output = rotation_and_fill(test_ct[0], data_size_glb, evaluator, gal_keys_rot);
-
-	// // for (int ccc = 0; ccc < 4; ccc++) {
-	// decryptor.decrypt(output, pl_test);
-	// batch_encoder.decode(pl_test, msg_test);
-	// for (int i = 0; i < (int) 1000; i++) {
-	// 	cout << msg_test[i] << " ";
-	// }
-
-	// cout << endl;
-	// // }
-	
+	long long preprocess_us = chrono::duration_cast<chrono::microseconds>(time_end - time_start).count();
+	cout << "Preprocess time: " << preprocess_us << " us.\n";
+	print_rss("after preprocessing");
 
 	/////////////////////////////////////////// for each node, prepare the gini-index inputs ////////////////////////////////////////////
-	vector<Ciphertext> selection_vector(pow(2, depth_glb));
+	vector<Ciphertext> selection_vector((int)pow(2, depth_glb));
 
 	// just fill in random selection vectors...
 	for (int i = 0; i < (int) selection_vector.size(); i++) {
@@ -213,42 +219,41 @@ int main(int argc, char* argv[]) {
 	}
 
 	// ideally, different nodes should have different partition thresholds, but just for some simulation...
-	int threshold_attr_ind = 1, threshold_val_ind = 1; 
-	// update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, 0, 0,
-	// 						seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
+	int threshold_attr_ind = 1, threshold_val_ind = 1;
 
 	vector<vector<vector<Ciphertext>>> partitions_for_node;
 	vector<vector<vector<vector<Ciphertext>>>> partition_labels_for_node;
 
+	bool sim_cts_saved = false;
+	Ciphertext sim_partition_ct, sim_partition_label_ct;
+
 	time_start = chrono::high_resolution_clock::now();
+	try {
 	for (int d = 0; d < depth_glb; d++) { // for each level in the tree, except the root
-		bool multi_thread = pow(2,d) >= 4;
+		bool multi_thread = false; // disabled: outer-parallel 4 threads OOM on 48GB; inner parallelism handles concurrency instead
 
-		cout << "	Training for level " << d << " with " << pow(2,d) << " nodes...\n";
+		cout << "	Training for level " << d << " with " << (int)pow(2,d) << " nodes...\n";
 
-		partitions_for_node.resize(pow(2,d));
-		partition_labels_for_node.resize(pow(2,d));
+		partitions_for_node.resize((int)pow(2,d));
+		partition_labels_for_node.resize((int)pow(2,d));
 
-		for (int ll = 0; ll < pow(2,d); ll++) {
+		for (int ll = 0; ll < (int)pow(2,d); ll++) {
 			partitions_for_node[ll].resize((int) preprocessed_partitions.size());
 			partition_labels_for_node[ll].resize((int) preprocessed_partitioned_labels.size());
 		}
 
 		if (multi_thread) {
 			NTL::SetNumThreads(num_cores);
-			int thread_chunk_size = pow(2,d) / num_cores;
+			int thread_chunk_size = (int)pow(2,d) / num_cores;
 			NTL_EXEC_RANGE(num_cores, first, last);
 			for (int tt = first; tt < last; tt++) {
 				for (int nd = tt*thread_chunk_size ; nd < (tt+1)*thread_chunk_size; nd++) { // for each node in this level
 
-					int sel_ind = pow(2, d)-1 + nd;
-					
-					// based on previous parent partition, threshold attribute value, each #data_size chunk record 
-					// this step is used just for multiplying the newly updated selection vector
-					// sum up each data_size chunk to a single value, and then square it
+					int sel_ind = (int)pow(2, d)-1 + nd;
+
 					vector<vector<Ciphertext>> random_preprocessed_partitions;
 					vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
-					simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels, 
+					simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels,
 														   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
 														   seal_context, evaluator, gal_keys_rot, !multi_thread);
 
@@ -256,44 +261,54 @@ int main(int argc, char* argv[]) {
 											   partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
 											   relin_keys, gal_keys_rot, !multi_thread);
 
-					// cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << endl;
-
-					// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
-					// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
-
-					
 					if (d != depth_glb-1) { // no need to update the leaf level
 						update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
 												seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
-
-						// cout << "sel: " << d << " " << decryptor.invariant_noise_budget(selection_vector[2*(pow(2, d)-1 + nd) + 1]) << endl;
 					}
-
 				}
 			}
 			NTL_EXEC_RANGE_END;
 		} else {
-			for (int nd = 0 ; nd < pow(2, d); nd++) { // for each node in this level
-				int sel_ind = pow(2, d)-1 + nd;
-				
-				// based on previous parent partition, threshold attribute value, each #data_size chunk record 
+			for (int nd = 0 ; nd < (int)pow(2, d); nd++) { // for each node in this level
+				int sel_ind = (int)pow(2, d)-1 + nd;
+				// When sqrt_attr == attr (no actual random selection needed), skip the simulate copy
+				// to avoid allocating ~8.7 GB of identical ciphertext duplicates per node.
+				// perform_partition_for_node only reads its inputs (via Ciphertext tmp = ...) so
+				// passing the global preprocessed_partitions directly is safe.
+				bool skip_simulate = (sqrt_attr_size_glb == attr_size_glb);
+
+				if (!skip_simulate) cout << "    node " << nd << "/" << (int)pow(2,d) << " simulate...\n";
+
 				vector<vector<Ciphertext>> random_preprocessed_partitions;
 				vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
-				simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels, 
-													   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
-													   seal_context, evaluator, gal_keys_rot, !multi_thread);
-													   
-				perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
-										partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
-										relin_keys, gal_keys_rot, !multi_thread);
 
-				
+				auto& parts_in  = skip_simulate ? preprocessed_partitions           : random_preprocessed_partitions;
+				auto& labels_in = skip_simulate ? preprocessed_partitioned_labels   : random_reprocessed_partitioned_labels;
 
-				// cout << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << endl;
+				if (!skip_simulate) {
+					simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels,
+														   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
+														   seal_context, evaluator, gal_keys_rot, !multi_thread);
+				}
+				if (d >= depth_glb - 2) print_rss(("after simulate d=" + to_string(d) + " nd=" + to_string(nd)).c_str());
 
-				// send "partition_labels_for_node" and "partitions_for_node" for MPC protocol and receive a specific threshold value for a specific attribute
-				// assume that we have the plaintext value indicating which attribute and which threshold value, update the selection vector corresponding
+				cout << "    node " << nd << "/" << (int)pow(2,d) << " partition (sim_parts=" << parts_in.size() << "x" << (parts_in.empty() ? 0 : parts_in[0].size()) << ")...\n";
+				perform_partition_for_node(parts_in, labels_in, partitions_for_node[nd],
+										   partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
+										   relin_keys, gal_keys_rot, !multi_thread);
 
+				if (d >= depth_glb - 2) print_rss(("after partition d=" + to_string(d) + " nd=" + to_string(nd)).c_str());
+				cout << "    node " << nd << "/" << (int)pow(2,d) << " done.\n";
+
+				// Save one representative ciphertext on first completion, then free immediately to avoid OOM accumulation
+				if (!sim_cts_saved && !partitions_for_node[nd].empty() && !partitions_for_node[nd][0].empty()) {
+					sim_partition_ct = partitions_for_node[nd][0][0];
+					sim_partition_label_ct = partition_labels_for_node[nd][0][0][0];
+					sim_cts_saved = true;
+				}
+				partitions_for_node[nd].clear();
+				partition_labels_for_node[nd].clear();
+				if (d >= depth_glb - 2) print_rss(("after clear d=" + to_string(d) + " nd=" + to_string(nd)).c_str());
 
 				if (d != depth_glb-1) { // no need to update the leaf level
 					update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
@@ -303,12 +318,20 @@ int main(int argc, char* argv[]) {
 		}
 	}
 
+	} catch (const std::bad_alloc&) {
+		time_end = chrono::high_resolution_clock::now();
+		long long oom_us = chrono::duration_cast<chrono::microseconds>(time_end - time_start).count();
+		cerr << "Out of memory during training loop (" << oom_us/1e6 << " s elapsed)\n";
+		return {ds_name, preprocess_us, -1LL};
+	}
+
+	// sim_partition_ct and sim_partition_label_ct were saved and partitions freed node-by-node during the loop.
+
 	// ── homomorphic vector-to-matrix multiplication after the depth loop ────────
 	// inputs_Y[0] packs matrix M: column l occupies slots [l*data_size_glb, (l+1)*data_size_glb).
 	// vec_ct packs vector v: v[l] is replicated in all slots of column l's range.
 	// result[j] = sum_{l=0}^{label_size_glb-1}  M[j][l] * v[l],  at output slots [0, data_size_glb).
 	{
-		// Build fresh vector ciphertext with v[l] replicated in column-l's slot range.
 		vector<uint64_t> v_msg(poly_modulus_degree_glb, 0);
 		for (int l = 0; l < label_size_glb; l++) {
 			uint64_t val = (uint64_t)(l + 1); // placeholder values; supplied via MPC in practice
@@ -330,16 +353,17 @@ int main(int argc, char* argv[]) {
 
 	// simulate the labeling for leaf nodes...
 	cout << "Calculating the labeling for leaf nodes...\n";
-	for (int i = 0; i < pow(2, depth_glb-1) / num_cores; i++) { // simulate the time of single thread
+	for (int i = 0; i < (int)(pow(2, depth_glb-1)) / num_cores; i++) { // simulate the time of single thread
 		Ciphertext tmp = preprocessed_partitioned_labels[0][0][0];
 		if (selection_vector[selection_vector.size()-3].parms_id() != seal_context.last_parms_id()) {
 			evaluator.mod_switch_to_next_inplace(selection_vector[selection_vector.size()-3]);
 		}
 		evaluator.mod_switch_to_inplace(tmp, selection_vector[selection_vector.size()-3].parms_id());
 		evaluator.multiply_inplace(tmp, selection_vector[selection_vector.size()-3]);
-		// if (i == 0) cout << "	" << decryptor.invariant_noise_budget(tmp) << endl;
 		evaluator.relinearize_inplace(tmp, relin_keys);
-		evaluator.mod_switch_to_next_inplace(tmp);  // BGV: mod down after CT×CT multiply
+		if (i == 0) cout << "\tNoise budget (leaf-label after relin): " << decryptor.invariant_noise_budget(tmp) << " bits\n";
+		if (tmp.parms_id() != seal_context.last_parms_id())
+			evaluator.mod_switch_to_next_inplace(tmp);  // BGV: mod down after CT×CT multiply
 		rotation_and_add(seal_context, tmp, data_size_glb, 1, evaluator, gal_keys_rot);
 	}
 
@@ -351,43 +375,96 @@ int main(int argc, char* argv[]) {
 	}
 
 	cout << "Simulate the packing and extraction...\n";
-	for (int d = 0; d < depth_glb - 2; d++) { // simulate for all intermediary level
-		for (int k = 0; k < pow(2,d); k++) { // for all nodes
-			for (int i = 0; i < ceil((double) (sqrt_attr_size_glb * (label_size_glb+1) * (2*value_size_glb-1)) / (double) num_cores); i++) { // simulate the single core runtime
-				Ciphertext tmp = partitions_for_node[0][0][0];
-				if (tmp.parms_id() != seal_context.last_parms_id()) {
-					evaluator.mod_switch_to_next_inplace(tmp);
+	try {
+		for (int d = 0; d < depth_glb - 2; d++) { // simulate for all intermediary level
+			for (int k = 0; k < (int)pow(2,d); k++) { // for all nodes
+				for (int i = 0; i < (int)ceil((double) (sqrt_attr_size_glb * (label_size_glb+1) * (2*value_size_glb-1)) / (double) num_cores); i++) { // simulate the single core runtime
+					Ciphertext tmp = sim_partition_ct;
+					if (tmp.parms_id() != seal_context.last_parms_id()) {
+						evaluator.mod_switch_to_next_inplace(tmp);
+					}
+					evaluator.multiply_plain_inplace(tmp, pll);
+					evaluator.rotate_rows_inplace(tmp, 1, gal_keys_rot);
+					evaluator.add_inplace(tmp, tmp);
 				}
-				evaluator.multiply_plain_inplace(tmp, pll);
-				evaluator.rotate_rows_inplace(tmp, 1, gal_keys_rot);
-				evaluator.add_inplace(tmp, tmp);
 			}
 		}
-	}
 
-	for (int d = 0; d < depth_glb - 2; d++) { // simulate for all intermediary level
-		for (int k = 0; k < pow(2,d); k++) { // for all nodes
-			for (int i = 0; i < ceil((double) label_size_glb / (double) num_cores); i++) { // simulate the single core runtime
-				Ciphertext tmp = partition_labels_for_node[0][0][0][0];
-				if (tmp.parms_id() != seal_context.last_parms_id()) {
-					evaluator.mod_switch_to_next_inplace(tmp);
+		for (int d = 0; d < depth_glb - 2; d++) { // simulate for all intermediary level
+			for (int k = 0; k < (int)pow(2,d); k++) { // for all nodes
+				for (int i = 0; i < (int)ceil((double) label_size_glb / (double) num_cores); i++) { // simulate the single core runtime
+					Ciphertext tmp = sim_partition_label_ct;
+					if (tmp.parms_id() != seal_context.last_parms_id()) {
+						evaluator.mod_switch_to_next_inplace(tmp);
+					}
+					evaluator.multiply_plain_inplace(tmp, pll);
+					evaluator.rotate_rows_inplace(tmp, 1, gal_keys_rot);
+					evaluator.add_inplace(tmp, tmp);
+
+					if (d == 0 && k == 0 && i == 0) cout << "\tLeft noise budget: " << decryptor.invariant_noise_budget(sim_partition_label_ct) << ", "
+					     << decryptor.invariant_noise_budget(tmp) << ", " << tmp.coeff_modulus_size() << endl;
 				}
-				evaluator.multiply_plain_inplace(tmp, pll);
-				evaluator.rotate_rows_inplace(tmp, 1, gal_keys_rot);
-				evaluator.add_inplace(tmp, tmp);
-
-				// if (d == 0 && k == 0 && i == 0) cout << "	Left noise budget: " << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << ", "
-				//  << decryptor.invariant_noise_budget(tmp) << ", " << tmp.coeff_modulus_size() << endl;
 			}
 		}
+	} catch (const std::bad_alloc&) {
+		cout << "\tPacking simulation skipped (out of memory)\n";
 	}
-
 
 	time_end = chrono::high_resolution_clock::now();
-	cout << "Training + labeling + packing total runtime: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
-		
+	long long train_us = chrono::duration_cast<chrono::microseconds>(time_end - time_start).count();
+	cout << "Training + labeling + packing total runtime: " << train_us << " us.\n";
 
+	return {ds_name, preprocess_us, train_us};
+}
+
+int main(int argc, char* argv[]) {
+
+	int dataset = std::stoi(argv[1]);
+	int depth   = std::stoi(argv[2]);
+	int is_bin  = std::stoi(argv[3]);
+	int is_sqrt = std::stoi(argv[4]);
+
+	if (dataset == 0) {
+		// run all four datasets and print a summary table
+		const string ds_names[] = {"", "iris", "wine", "cancer", "digit"};
+		vector<RunResult> results;
+		for (int ds = 1; ds <= 4; ds++) {
+			try {
+				results.push_back(run_dataset(ds, depth, is_bin, is_sqrt));
+			} catch (const std::bad_alloc&) {
+				cerr << "Out of memory for dataset " << ds_names[ds] << "\n";
+				results.push_back({ds_names[ds], 0LL, -1LL});
+			}
+		}
+
+		const int W = 72;
+		cout << "\n" << string(W, '=') << "\n";
+		cout << "Runtime Summary  (depth=" << depth
+		     << "  is_bin=" << is_bin << "  is_sqrt=" << is_sqrt << ")\n";
+		cout << string(W, '-') << "\n";
+		cout << left  << setw(10) << "Dataset"
+		     << right << setw(18) << "Preprocess (s)"
+		     << setw(18) << "Training (s)"
+		     << setw(16) << "Total (s)" << "\n";
+		cout << string(W, '-') << "\n";
+		for (auto& r : results) {
+			cout << left << setw(10) << r.name;
+			if (r.train_us < 0) {
+				cout << right << setw(18) << fixed << setprecision(2) << r.preprocess_us / 1e6
+				     << setw(18) << "OOM" << setw(16) << "OOM" << "\n";
+			} else {
+				double pre_s   = r.preprocess_us / 1e6;
+				double train_s = r.train_us      / 1e6;
+				cout << right << fixed << setprecision(2)
+				     << setw(18) << pre_s
+				     << setw(18) << train_s
+				     << setw(16) << (pre_s + train_s) << "\n";
+			}
+		}
+		cout << string(W, '=') << "\n";
+	} else {
+		run_dataset(dataset, depth, is_bin, is_sqrt);
+	}
 
 	return 0;
-
 }

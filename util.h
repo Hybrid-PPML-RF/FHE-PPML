@@ -397,10 +397,12 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                                 Ciphertext& selection_vector, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys,
                                 bool multi_thread = false) {
 
+    partitions_for_node.resize(preprocessed_partitions.size());
     for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
         partitions_for_node[cnt].resize((int) preprocessed_partitions[cnt].size());
     }
 
+    partition_labels_for_node.resize(preprocessed_partitioned_labels.size());
     for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt ++) {
         partition_labels_for_node[cnt].resize(label_size_glb, vector<Ciphertext>((int) preprocessed_partitioned_labels[0][0].size()));
     }
@@ -526,7 +528,7 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
 
         for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt++) {
             for (int l = 0; l < label_size_glb; l++) {
-                for (int i = 0; i < (int) preprocessed_partitioned_labels.size(); i++) {
+                for (int i = 0; i < (int) preprocessed_partitioned_labels[0][0].size(); i++) {
                     // cout << "       " << cnt << ", " << l << ", " << i << endl;
                     Ciphertext tmp = preprocessed_partitioned_labels[cnt][l][i];
                     if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(selection_vector.parms_id())->chain_index()) {
@@ -723,9 +725,9 @@ void simulate_random_select_sqrt_attributes(vector<vector<Ciphertext>>& preproce
         for (int j = 0; j < (int) random_preprocessed_partitions[i].size(); j++) {
             random_preprocessed_partitions[i][j] = preprocessed_partitions[0][j];
         }
-        random_preprocessed_partitioned_labels[i].resize(preprocessed_partitioned_labels[i].size());
+        random_preprocessed_partitioned_labels[i].resize(preprocessed_partitioned_labels[0].size());
         for (int j = 0; j < (int) random_preprocessed_partitioned_labels[i].size(); j++) {
-            random_preprocessed_partitioned_labels[i][j].resize((int)preprocessed_partitioned_labels[i][j].size());
+            random_preprocessed_partitioned_labels[i][j].resize((int)preprocessed_partitioned_labels[0][j].size());
             for (int k = 0; k < (int) random_preprocessed_partitioned_labels[i][j].size(); k++) {
                 random_preprocessed_partitioned_labels[i][j][k] = preprocessed_partitioned_labels[0][j][k];
             }
