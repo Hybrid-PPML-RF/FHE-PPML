@@ -48,3 +48,6 @@ target_link_libraries(ppml SEAL::seal_shared /opt/homebrew/lib/libntl.dylib m /o
 
 add_executable( benchmark benchmark.cpp )
 target_link_libraries(benchmark SEAL::seal_shared)
+
+add_executable( ppml_matvec main_matvec.cpp )
+target_link_libraries(ppml_matvec SEAL::seal_shared /opt/homebrew/lib/libntl.dylib m /opt/homebrew/lib/libgmp.dylib)
