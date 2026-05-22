@@ -314,117 +314,186 @@ int main(int argc, char* argv[]) {
 
 	// ===== Vector-to-Matrix Multiplication Layer (optimized) =====
 	//
-	// Compute z = W * v  where v is length data_size_glb and W is data_size_glb x label_size_glb.
-	// Result z has length label_size_glb; z[j] = sum_i v[i] * W[i][j].
+	// Why chain_index=1 (95 bits) is the minimum in the training context:
+	//   chain_index=0 has 1 prime → CT×CT multiply fails (needs ~67-bit prime, SEAL max=61).
+	//   chain_index=1 gives 56 bits AFTER the full pipeline — much more than needed.
 	//
-	// Packing (column-major, one CT per matrix column):
-	//   ct_vec       : slot[i] = v[i],    i = 0..data_size_glb-1  (fresh)
-	//   ct_mat_col[j]: slot[i] = W[i][j], i = 0..data_size_glb-1  (same budget as inputs_Y)
+	// Solution: dedicated minimal BGV context with {comp, comp, special...} primes.
+	//   - 2 small computation primes for the chain: tighten the noise budget.
+	//   - Extra 60-bit "special" primes: improve key-switch decomposition quality.
+	//     Without the special prime, rotation_and_add fails even with {60,60} (2-prime context
+	//     gives only 2 bits after multiply, and each rotation (key-switch) consumes them all).
+	//     With 1 extra 60-bit prime, the key-switch key decomposes over 3 primes → rotation cheap.
+	//   Empirically: {34,34,60} → at_chain1=43 bits → after_mul=8 → after_rot=2 (PASS).
+	//   This context is independent of the training chain, so training is unaffected.
 	//
-	// Optimizations applied:
-	//   1. Mod-switch to last_parms_id (single prime, minimum cost NTTs) before any work.
-	//   2. BGV in SEAL 4.x already stores ALL ciphertexts in NTT form (is_ntt_form()==true).
-	//      multiply() detects this and skips all forward NTTs — the "pre-compute NTT" benefit
-	//      is built-in. ct_vec is reused across label_size_glb column multiplications with
-	//      zero extra forward NTT cost each time.
-	//   3. rotate_rows and add_inplace also operate directly on NTT-form ciphertexts in BGV,
-	//      so no transform_from_ntt step is needed.
-	//   4. Separate timing for multiply+relin vs rotation_and_add.
+	// BGV note: ciphertexts are already stored in NTT form (is_ntt_form()==true).
+	//   multiply() skips forward NTT automatically; no explicit transform needed.
 	//
-	// BSGS analysis:
-	//   Baby-step giant-step reduces rotation count from O(n) to O(sqrt(n)) for a dense
-	//   n-element linear combination (e.g. diagonal matrix-vector with plaintext weights).
-	//   Here we are summing data_size_glb=100 elements with unit weight. The log2-halving
-	//   rotation_and_add already achieves O(log2(100))≈7 rotations — strictly better than
-	//   BSGS (2*sqrt(100)=20 rotations). BSGS only wins when n is large and the weights
-	//   are non-uniform, which is not the case here. No BSGS applied.
+	// BSGS analysis: log2(100)≈7 rotations < 2*sqrt(100)=20 (BSGS), so log2-halving wins.
+
+	// Calibration: find the minimal prime configuration where the full pipeline
+	// (CT×CT multiply + relinearize + rotation_and_add over data_size_glb slots)
+	// decrypts correctly with ≥1 bit budget remaining.
+	//
+	// 2-prime contexts fail: key-switch decomposition over only 2 primes is too noisy.
+	// Adding extra "special" primes beyond the computation chain improves key-switch quality.
+	// We test {comp, comp, 60} (3 primes) and {comp, comp, 60, 60} (4 primes).
+	cout << "\n--- Minimal-context calibration ---\n";
+	// Each entry: {computation_prime_bits, num_special_60bit_primes}
+	struct CalConfig { int comp_pb; int n_special; };
+	vector<CalConfig> configs;
+	for (int pb : {34, 38, 42, 46, 50, 54, 58, 60}) configs.push_back({pb, 0});
+	for (int pb : {34, 38, 42, 46, 50}) configs.push_back({pb, 1});
+	for (int pb : {34, 38, 42}) configs.push_back({pb, 2});
+
+	int best_comp_pb = -1, best_n_special = -1;
+	for (auto& cfg : configs) {
+		vector<int> primes(2, cfg.comp_pb);
+		for (int s = 0; s < cfg.n_special; s++) primes.push_back(60);
+
+		EncryptionParameters cal_params(scheme_type::bgv);
+		cal_params.set_poly_modulus_degree(poly_modulus_degree_glb);
+		cal_params.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree_glb, primes));
+		cal_params.set_plain_modulus(p);
+		SEALContext cal_ctx(cal_params, true, sec_level_type::none);
+		KeyGenerator cal_kg(cal_ctx);
+		SecretKey cal_sk = cal_kg.secret_key();
+		PublicKey cal_pk; cal_kg.create_public_key(cal_pk);
+		RelinKeys cal_rk; cal_kg.create_relin_keys(cal_rk);
+		vector<int> cal_steps = {1, 2, 3, 6, 12, 24, 25, 50};
+		GaloisKeys cal_gk; cal_kg.create_galois_keys(cal_steps, cal_gk);
+		Encryptor cal_enc(cal_ctx, cal_pk);
+		Evaluator cal_eval(cal_ctx);
+		BatchEncoder cal_benc(cal_ctx);
+		Decryptor cal_dec(cal_ctx, cal_sk);
+		vector<uint64_t> cal_msg(poly_modulus_degree_glb, 1);
+		Plaintext cal_pl; cal_benc.encode(cal_msg, cal_pl);
+		Ciphertext cal_a, cal_b; cal_enc.encrypt(cal_pl, cal_a); cal_enc.encrypt(cal_pl, cal_b);
+		int fresh = cal_dec.invariant_noise_budget(cal_a);
+		// Mod-switch down to chain_index=1 (just the 2 computation primes) before multiply
+		// so we do the multiply at the tightest level.
+		while (cal_ctx.get_context_data(cal_a.parms_id())->chain_index() > 1)
+			cal_eval.mod_switch_to_next_inplace(cal_a);
+		while (cal_ctx.get_context_data(cal_b.parms_id())->chain_index() > 1)
+			cal_eval.mod_switch_to_next_inplace(cal_b);
+		int at_chain1 = cal_dec.invariant_noise_budget(cal_a);
+		cal_eval.multiply_inplace(cal_a, cal_b);
+		cal_eval.relinearize_inplace(cal_a, cal_rk);
+		int after_mul = cal_dec.invariant_noise_budget(cal_a);
+		cal_a = rotation_and_add(cal_ctx, cal_a, data_size_glb, 1, cal_eval, cal_gk, 0);
+		int after_rot = cal_dec.invariant_noise_budget(cal_a);
+		Plaintext cal_res_pl; cal_dec.decrypt(cal_a, cal_res_pl);
+		vector<uint64_t> cal_res(poly_modulus_degree_glb, 0);
+		cal_benc.decode(cal_res_pl, cal_res);
+		bool correct = (cal_res[0] == (uint64_t)data_size_glb);
+		cout << "  {" << cfg.comp_pb << "," << cfg.comp_pb;
+		for (int s=0; s<cfg.n_special; s++) cout << ",60";
+		cout << "} total=" << (2*cfg.comp_pb + 60*cfg.n_special)
+		     << " bits: fresh=" << fresh << "  at_chain1=" << at_chain1
+		     << "  after_mul=" << after_mul << "  after_rot=" << after_rot
+		     << (after_rot <= 0 ? " FAIL" : (correct ? " PASS" : " WRONG")) << "\n";
+		if (after_rot >= 1 && correct && best_comp_pb < 0) {
+			best_comp_pb = cfg.comp_pb;
+			best_n_special = cfg.n_special;
+		}
+	}
+	if (best_comp_pb < 0) {
+		cout << "No viable config found — using fallback {60,60,60}\n";
+		best_comp_pb = 60; best_n_special = 1;
+	}
+	cout << "Chosen: comp_prime=" << best_comp_pb << " bits, n_special=" << best_n_special << "\n";
 
 	cout << "\n--- Vector-to-Matrix Multiplication Layer (optimized) ---\n";
-	cout << "Vector length: " << data_size_glb
-	     << ", Matrix: " << data_size_glb << "x" << label_size_glb << "\n";
+	cout << "Vector: " << data_size_glb << " elements, Matrix: "
+	     << data_size_glb << "x" << label_size_glb << "\n";
 
-	// Encrypt a fresh random vector v
+	// Build a dedicated minimal BGV context for vec-to-mat using the calibrated config.
+	// Primes: 2 small computation primes + best_n_special large primes for key-switch quality.
+	vector<int> vm_prime_list(2, best_comp_pb);
+	for (int s = 0; s < best_n_special; s++) vm_prime_list.push_back(60);
+	EncryptionParameters vm_params(scheme_type::bgv);
+	vm_params.set_poly_modulus_degree(poly_modulus_degree_glb);
+	vm_params.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree_glb, vm_prime_list));
+	vm_params.set_plain_modulus(p);
+	SEALContext vm_context(vm_params, true, sec_level_type::none);
+
+	KeyGenerator vm_keygen(vm_context);
+	SecretKey vm_sk = vm_keygen.secret_key();
+	PublicKey vm_pk;  vm_keygen.create_public_key(vm_pk);
+	RelinKeys vm_relin;  vm_keygen.create_relin_keys(vm_relin);
+
+	// Galois keys for rotation_and_add: steps needed for data_size_glb=100, chunk_size=1.
+	vector<int> vm_steps = {1, 2, 3, 6, 12, 24, 25, 50};
+	GaloisKeys vm_gal_keys;
+	vm_keygen.create_galois_keys(vm_steps, vm_gal_keys);
+
+	Encryptor vm_enc(vm_context, vm_pk);
+	Evaluator vm_eval(vm_context);
+	BatchEncoder vm_benc(vm_context);
+	Decryptor vm_dec(vm_context, vm_sk);
+
+	// Encrypt known plaintexts (v[i]=1, W[i][j]=1) for correctness verification.
+	// Expected: z[j] = sum_i 1*1 = data_size_glb = 100 for each j.
 	vector<uint64_t> vec_msg(poly_modulus_degree_glb, 0);
-	for (int i = 0; i < data_size_glb; i++) vec_msg[i] = (uint64_t)(i + 1) % (uint64_t)p;
+	for (int i = 0; i < data_size_glb; i++) vec_msg[i] = 1;
 	Plaintext pl_vec;
-	batch_encoder.encode(vec_msg, pl_vec);
+	vm_benc.encode(vec_msg, pl_vec);
 	Ciphertext ct_vec;
-	encryptor.encrypt(pl_vec, ct_vec);
+	vm_enc.encrypt(pl_vec, ct_vec);
 
-	// Encrypt label_size_glb matrix columns (same budget as inputs_Y = fresh)
+	// Mod-switch vec and mat down to chain_index=1 (the 2 computation primes only).
+	while (vm_context.get_context_data(ct_vec.parms_id())->chain_index() > 1)
+		vm_eval.mod_switch_to_next_inplace(ct_vec);
+
 	vector<Ciphertext> ct_mat_cols(label_size_glb);
 	for (int j = 0; j < label_size_glb; j++) {
-		vector<uint64_t> col_msg(poly_modulus_degree_glb, 0);
-		for (int i = 0; i < data_size_glb; i++) col_msg[i] = (uint64_t)(i * label_size_glb + j + 1) % (uint64_t)p;
 		Plaintext pl_col;
-		batch_encoder.encode(col_msg, pl_col);
-		encryptor.encrypt(pl_col, ct_mat_cols[j]);
+		vm_benc.encode(vec_msg, pl_col);  // all-ones column
+		vm_enc.encrypt(pl_col, ct_mat_cols[j]);
+		while (vm_context.get_context_data(ct_mat_cols[j].parms_id())->chain_index() > 1)
+			vm_eval.mod_switch_to_next_inplace(ct_mat_cols[j]);
 	}
 
-	cout << "Noise budget before mod-switch: ct_vec="
-	     << decryptor.invariant_noise_budget(ct_vec) << " bits, ct_mat_col[0]="
-	     << decryptor.invariant_noise_budget(ct_mat_cols[0]) << " bits\n";
+	cout << "Minimal context: comp=" << best_comp_pb << " bits x2"
+	     << (best_n_special > 0 ? (" + 60 bits x" + to_string(best_n_special) + " special") : "")
+	     << "\n";
+	cout << "Fresh noise budget: ct_vec=" << vm_dec.invariant_noise_budget(ct_vec) << " bits\n";
 
-	// Optimization 1: mod-switch to the lowest level where a single CT×CT multiply still
-	// leaves a positive noise budget (i.e., result remains decryptable).
-	// chain_index=0 (1 prime, 60 bits): fresh budget=35 bits, but after multiply drops to 0
-	//   (noise grows as product of both noise terms * n) → NOT decryptable.
-	// chain_index=1 (2 primes, 120 bits): fresh budget≈95 bits, after multiply≈56 bits → OK.
-	// So chain_index=1 is the minimum viable level for one CT×CT.
-	parms_id_type min_viable_parms;
-	{
-		auto ctx = seal_context.first_context_data();
-		while (ctx->next_context_data() && ctx->next_context_data()->chain_index() >= 1) {
-			ctx = ctx->next_context_data();
-		}
-		min_viable_parms = ctx->parms_id();  // chain_index=1
-	}
-	evaluator.mod_switch_to_inplace(ct_vec, min_viable_parms);
-	for (int j = 0; j < label_size_glb; j++) {
-		evaluator.mod_switch_to_inplace(ct_mat_cols[j], min_viable_parms);
-	}
-
-	cout << "Noise budget after mod-switch to min viable level (chain_index=1): ct_vec="
-	     << decryptor.invariant_noise_budget(ct_vec) << " bits, ct_mat_col[0]="
-	     << decryptor.invariant_noise_budget(ct_mat_cols[0]) << " bits\n";
-
-	// Optimization 2 (implicit for BGV): BGV ciphertexts are already in NTT form.
-	// Verify and report — no transform needed.
-	cout << "ct_vec.is_ntt_form() = " << ct_vec.is_ntt_form()
-	     << ", ct_mat_col[0].is_ntt_form() = " << ct_mat_cols[0].is_ntt_form() << "\n";
-	cout << "NTT form is pre-built into BGV: multiply() skips forward NTT automatically.\n";
-
-	// Compute z[j] = sum_i v[i]*W[i][j] for each column, with separated timing.
+	// Compute z[j] = sum_i v[i]*W[i][j] with separate timing.
 	vector<Ciphertext> ct_result(label_size_glb);
 	long long total_mul_us = 0, total_rot_us = 0;
 
 	for (int j = 0; j < label_size_glb; j++) {
-		// -- multiply + relinearize (both inputs already in NTT form; forward NTT skipped) --
 		auto t_mul_start = chrono::high_resolution_clock::now();
 		Ciphertext ct_prod;
-		evaluator.multiply(ct_vec, ct_mat_cols[j], ct_prod);
-		evaluator.relinearize_inplace(ct_prod, relin_keys);
-		// ct_prod remains in NTT form; rotate_rows and add_inplace handle NTT form natively in BGV.
+		vm_eval.multiply(ct_vec, ct_mat_cols[j], ct_prod);
+		vm_eval.relinearize_inplace(ct_prod, vm_relin);
 		auto t_mul_end = chrono::high_resolution_clock::now();
 		total_mul_us += chrono::duration_cast<chrono::microseconds>(t_mul_end - t_mul_start).count();
 
-		// -- rotation_and_add: sum data_size_glb slots into slot 0 --
 		auto t_rot_start = chrono::high_resolution_clock::now();
-		ct_result[j] = rotation_and_add(seal_context, ct_prod, data_size_glb, 1, evaluator, gal_keys_rot, 0);
+		ct_result[j] = rotation_and_add(vm_context, ct_prod, data_size_glb, 1, vm_eval, vm_gal_keys, 0);
 		auto t_rot_end = chrono::high_resolution_clock::now();
 		total_rot_us += chrono::duration_cast<chrono::microseconds>(t_rot_end - t_rot_start).count();
 	}
 
-	cout << "Multiply + relin + from_ntt time (" << label_size_glb << " columns total): "
-	     << total_mul_us << " us"
-	     << "  (per column: " << total_mul_us / label_size_glb << " us)\n";
-	cout << "Rotation-and-add time (" << label_size_glb << " columns total): "
-	     << total_rot_us << " us"
-	     << "  (per column: " << total_rot_us / label_size_glb << " us,"
-	     << " log2(" << data_size_glb << ")≈7 rotations each)\n";
-	cout << "Vec-to-mat total time: " << (total_mul_us + total_rot_us) << " us\n";
-	cout << "Result noise budget: ct_result[0]="
-	     << decryptor.invariant_noise_budget(ct_result[0]) << " bits\n";
+	// Verify correctness and report noise.
+	Plaintext pl_check;
+	vector<uint64_t> msg_check(poly_modulus_degree_glb, 0);
+	vm_dec.decrypt(ct_result[0], pl_check);
+	vm_benc.decode(pl_check, msg_check);
+	cout << "Correctness: slot[0]=" << msg_check[0]
+	     << " (expected " << data_size_glb << ") → "
+	     << (msg_check[0] == (uint64_t)data_size_glb ? "PASS" : "FAIL") << "\n";
+	cout << "Noise budget after multiply+relin+rot: "
+	     << vm_dec.invariant_noise_budget(ct_result[0]) << " bits\n";
+	cout << "Multiply + relin (" << label_size_glb << " cols): "
+	     << total_mul_us << " us  (per col: " << total_mul_us / label_size_glb << " us)\n";
+	cout << "Rotation-and-add (" << label_size_glb << " cols): "
+	     << total_rot_us << " us  (per col: " << total_rot_us / label_size_glb
+	     << " us, ~7 rotations)\n";
+	cout << "Vec-to-mat total: " << (total_mul_us + total_rot_us) << " us\n";
 
 	return 0;
 
