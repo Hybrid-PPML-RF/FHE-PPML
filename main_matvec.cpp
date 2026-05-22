@@ -312,188 +312,91 @@ int main(int argc, char* argv[]) {
 	cout << "Training + labeling + packing total runtime: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
 
 
-	// ===== Vector-to-Matrix Multiplication Layer (optimized) =====
+	// ===== Vector-to-Matrix Multiplication Layer =====
 	//
-	// Why chain_index=1 (95 bits) is the minimum in the training context:
-	//   chain_index=0 has 1 prime → CT×CT multiply fails (needs ~67-bit prime, SEAL max=61).
-	//   chain_index=1 gives 56 bits AFTER the full pipeline — much more than needed.
+	// Uses real inputs_Y[0] (column-major: slot[j*data_size_glb + i] = Y[i][j]).
 	//
-	// Solution: dedicated minimal BGV context with {comp, comp, special...} primes.
-	//   - 2 small computation primes for the chain: tighten the noise budget.
-	//   - Extra 60-bit "special" primes: improve key-switch decomposition quality.
-	//     Without the special prime, rotation_and_add fails even with {60,60} (2-prime context
-	//     gives only 2 bits after multiply, and each rotation (key-switch) consumes them all).
-	//     With 1 extra 60-bit prime, the key-switch key decomposes over 3 primes → rotation cheap.
-	//   Empirically: {34,34,60} → at_chain1=43 bits → after_mul=8 → after_rot=2 (PASS).
-	//   This context is independent of the training chain, so training is unaffected.
+	// SIMD approach: replicate the input vector v across label_size_glb blocks to match
+	// the column-major layout. One CT×CT multiply gives all columns simultaneously.
+	// A SINGLE rotation_and_add call then sums within each group of data_size_glb:
+	//   z[j] = sum_i v[i]*Y[i][j] accumulates at slot[j*data_size_glb].
 	//
-	// BGV note: ciphertexts are already stored in NTT form (is_ntt_form()==true).
-	//   multiply() skips forward NTT automatically; no explicit transform needed.
-	//
-	// BSGS analysis: log2(100)≈7 rotations < 2*sqrt(100)=20 (BSGS), so log2-halving wins.
+	// Why no masking is needed: rotation_and_add(n, chunk_size=1) builds the sum at
+	// slot[k] using only slots k..k+(n/2)-1 at each halving step. Contaminated slots
+	// (upper half of each group) are never read back into slot[k], so all label_size_glb
+	// column sums are computed correctly in one pass.
+	//   vs old approach (column loop): label_size_glb CT×CT + label_size_glb rot_and_add
+	//   new approach: 1 CT×CT + 1 rot_and_add  → (label_size_glb-1) fewer CT×CT multiplies
 
-	// Calibration: find the minimal prime configuration where the full pipeline
-	// (CT×CT multiply + relinearize + rotation_and_add over data_size_glb slots)
-	// decrypts correctly with ≥1 bit budget remaining.
-	//
-	// 2-prime contexts fail: key-switch decomposition over only 2 primes is too noisy.
-	// Adding extra "special" primes beyond the computation chain improves key-switch quality.
-	// We test {comp, comp, 60} (3 primes) and {comp, comp, 60, 60} (4 primes).
-	cout << "\n--- Minimal-context calibration ---\n";
-	// Each entry: {computation_prime_bits, num_special_60bit_primes}
-	struct CalConfig { int comp_pb; int n_special; };
-	vector<CalConfig> configs;
-	for (int pb : {34, 38, 42, 46, 50, 54, 58, 60}) configs.push_back({pb, 0});
-	for (int pb : {34, 38, 42, 46, 50}) configs.push_back({pb, 1});
-	for (int pb : {34, 38, 42}) configs.push_back({pb, 2});
+	cout << "\n--- Vector-to-Matrix Multiplication Layer ---\n";
+	cout << "Vector length: " << data_size_glb << ", Matrix: "
+	     << data_size_glb << "x" << label_size_glb
+	     << " (using real inputs_Y[0])\n";
 
-	int best_comp_pb = -1, best_n_special = -1;
-	for (auto& cfg : configs) {
-		vector<int> primes(2, cfg.comp_pb);
-		for (int s = 0; s < cfg.n_special; s++) primes.push_back(60);
+	// inputs_Y[0] packing: slot[j*data_size_glb + i] = Y[i][j].
+	// After training, check its chain_index and mod-switch to chain_index=1.
+	Ciphertext ct_Y = inputs_Y[0];
+	cout << "inputs_Y[0] noise budget: " << decryptor.invariant_noise_budget(ct_Y)
+	     << " bits (chain_index="
+	     << seal_context.get_context_data(ct_Y.parms_id())->chain_index() << ")\n";
+	while (seal_context.get_context_data(ct_Y.parms_id())->chain_index() > 1)
+		evaluator.mod_switch_to_next_inplace(ct_Y);
+	cout << "After mod-switch to chain_index=1: "
+	     << decryptor.invariant_noise_budget(ct_Y) << " bits\n";
 
-		EncryptionParameters cal_params(scheme_type::bgv);
-		cal_params.set_poly_modulus_degree(poly_modulus_degree_glb);
-		cal_params.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree_glb, primes));
-		cal_params.set_plain_modulus(p);
-		SEALContext cal_ctx(cal_params, true, sec_level_type::none);
-		KeyGenerator cal_kg(cal_ctx);
-		SecretKey cal_sk = cal_kg.secret_key();
-		PublicKey cal_pk; cal_kg.create_public_key(cal_pk);
-		RelinKeys cal_rk; cal_kg.create_relin_keys(cal_rk);
-		vector<int> cal_steps = {1, 2, 3, 6, 12, 24, 25, 50};
-		GaloisKeys cal_gk; cal_kg.create_galois_keys(cal_steps, cal_gk);
-		Encryptor cal_enc(cal_ctx, cal_pk);
-		Evaluator cal_eval(cal_ctx);
-		BatchEncoder cal_benc(cal_ctx);
-		Decryptor cal_dec(cal_ctx, cal_sk);
-		vector<uint64_t> cal_msg(poly_modulus_degree_glb, 1);
-		Plaintext cal_pl; cal_benc.encode(cal_msg, cal_pl);
-		Ciphertext cal_a, cal_b; cal_enc.encrypt(cal_pl, cal_a); cal_enc.encrypt(cal_pl, cal_b);
-		int fresh = cal_dec.invariant_noise_budget(cal_a);
-		// Mod-switch down to chain_index=1 (just the 2 computation primes) before multiply
-		// so we do the multiply at the tightest level.
-		while (cal_ctx.get_context_data(cal_a.parms_id())->chain_index() > 1)
-			cal_eval.mod_switch_to_next_inplace(cal_a);
-		while (cal_ctx.get_context_data(cal_b.parms_id())->chain_index() > 1)
-			cal_eval.mod_switch_to_next_inplace(cal_b);
-		int at_chain1 = cal_dec.invariant_noise_budget(cal_a);
-		cal_eval.multiply_inplace(cal_a, cal_b);
-		cal_eval.relinearize_inplace(cal_a, cal_rk);
-		int after_mul = cal_dec.invariant_noise_budget(cal_a);
-		cal_a = rotation_and_add(cal_ctx, cal_a, data_size_glb, 1, cal_eval, cal_gk, 0);
-		int after_rot = cal_dec.invariant_noise_budget(cal_a);
-		Plaintext cal_res_pl; cal_dec.decrypt(cal_a, cal_res_pl);
-		vector<uint64_t> cal_res(poly_modulus_degree_glb, 0);
-		cal_benc.decode(cal_res_pl, cal_res);
-		bool correct = (cal_res[0] == (uint64_t)data_size_glb);
-		cout << "  {" << cfg.comp_pb << "," << cfg.comp_pb;
-		for (int s=0; s<cfg.n_special; s++) cout << ",60";
-		cout << "} total=" << (2*cfg.comp_pb + 60*cfg.n_special)
-		     << " bits: fresh=" << fresh << "  at_chain1=" << at_chain1
-		     << "  after_mul=" << after_mul << "  after_rot=" << after_rot
-		     << (after_rot <= 0 ? " FAIL" : (correct ? " PASS" : " WRONG")) << "\n";
-		if (after_rot >= 1 && correct && best_comp_pb < 0) {
-			best_comp_pb = cfg.comp_pb;
-			best_n_special = cfg.n_special;
-		}
-	}
-	if (best_comp_pb < 0) {
-		cout << "No viable config found — using fallback {60,60,60}\n";
-		best_comp_pb = 60; best_n_special = 1;
-	}
-	cout << "Chosen: comp_prime=" << best_comp_pb << " bits, n_special=" << best_n_special << "\n";
+	// Create ct_v_rep: replicate v[i]=1 across label_size_glb blocks to match inputs_Y layout.
+	// slot[j*data_size_glb + i] = v[i] for j=0..label_size_glb-1, i=0..data_size_glb-1.
+	// (v[i]=1 is the test vector; in production this would be the client's feature vector.)
+	vector<uint64_t> v_rep_msg(poly_modulus_degree_glb, 0);
+	for (int j = 0; j < label_size_glb; j++)
+		for (int i = 0; i < data_size_glb; i++)
+			v_rep_msg[j * data_size_glb + i] = 1;
+	Plaintext pl_v_rep;
+	batch_encoder.encode(v_rep_msg, pl_v_rep);
+	Ciphertext ct_v_rep;
+	encryptor.encrypt(pl_v_rep, ct_v_rep);
+	while (seal_context.get_context_data(ct_v_rep.parms_id())->chain_index() > 1)
+		evaluator.mod_switch_to_next_inplace(ct_v_rep);
 
-	cout << "\n--- Vector-to-Matrix Multiplication Layer (optimized) ---\n";
-	cout << "Vector: " << data_size_glb << " elements, Matrix: "
-	     << data_size_glb << "x" << label_size_glb << "\n";
+	// Single CT×CT: slot[j*data_size_glb + i] = v[i] * Y[i][j] for all j,i.
+	auto t_mul_start = chrono::high_resolution_clock::now();
+	Ciphertext ct_prod;
+	evaluator.multiply(ct_v_rep, ct_Y, ct_prod);
+	evaluator.relinearize_inplace(ct_prod, relin_keys);
+	auto t_mul_end = chrono::high_resolution_clock::now();
+	long long mul_us = chrono::duration_cast<chrono::microseconds>(t_mul_end - t_mul_start).count();
+	cout << "Noise budget after multiply+relin: "
+	     << decryptor.invariant_noise_budget(ct_prod) << " bits\n";
 
-	// Build a dedicated minimal BGV context for vec-to-mat using the calibrated config.
-	// Primes: 2 small computation primes + best_n_special large primes for key-switch quality.
-	vector<int> vm_prime_list(2, best_comp_pb);
-	for (int s = 0; s < best_n_special; s++) vm_prime_list.push_back(60);
-	EncryptionParameters vm_params(scheme_type::bgv);
-	vm_params.set_poly_modulus_degree(poly_modulus_degree_glb);
-	vm_params.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree_glb, vm_prime_list));
-	vm_params.set_plain_modulus(p);
-	SEALContext vm_context(vm_params, true, sec_level_type::none);
+	// Single rotation_and_add over data_size_glb elements: sums all label_size_glb groups
+	// simultaneously. Result: slot[j*data_size_glb] = z[j] for j=0..label_size_glb-1.
+	auto t_rot_start = chrono::high_resolution_clock::now();
+	Ciphertext ct_result = rotation_and_add(seal_context, ct_prod, data_size_glb, 1,
+	                                         evaluator, gal_keys_rot, 0);
+	auto t_rot_end = chrono::high_resolution_clock::now();
+	long long rot_us = chrono::duration_cast<chrono::microseconds>(t_rot_end - t_rot_start).count();
+	cout << "Noise budget after rotation_and_add: "
+	     << decryptor.invariant_noise_budget(ct_result) << " bits\n";
 
-	KeyGenerator vm_keygen(vm_context);
-	SecretKey vm_sk = vm_keygen.secret_key();
-	PublicKey vm_pk;  vm_keygen.create_public_key(vm_pk);
-	RelinKeys vm_relin;  vm_keygen.create_relin_keys(vm_relin);
-
-	// Galois keys for rotation_and_add: steps needed for data_size_glb=100, chunk_size=1.
-	vector<int> vm_steps = {1, 2, 3, 6, 12, 24, 25, 50};
-	GaloisKeys vm_gal_keys;
-	vm_keygen.create_galois_keys(vm_steps, vm_gal_keys);
-
-	Encryptor vm_enc(vm_context, vm_pk);
-	Evaluator vm_eval(vm_context);
-	BatchEncoder vm_benc(vm_context);
-	Decryptor vm_dec(vm_context, vm_sk);
-
-	// Encrypt known plaintexts (v[i]=1, W[i][j]=1) for correctness verification.
-	// Expected: z[j] = sum_i 1*1 = data_size_glb = 100 for each j.
-	vector<uint64_t> vec_msg(poly_modulus_degree_glb, 0);
-	for (int i = 0; i < data_size_glb; i++) vec_msg[i] = 1;
-	Plaintext pl_vec;
-	vm_benc.encode(vec_msg, pl_vec);
-	Ciphertext ct_vec;
-	vm_enc.encrypt(pl_vec, ct_vec);
-
-	// Mod-switch vec and mat down to chain_index=1 (the 2 computation primes only).
-	while (vm_context.get_context_data(ct_vec.parms_id())->chain_index() > 1)
-		vm_eval.mod_switch_to_next_inplace(ct_vec);
-
-	vector<Ciphertext> ct_mat_cols(label_size_glb);
-	for (int j = 0; j < label_size_glb; j++) {
-		Plaintext pl_col;
-		vm_benc.encode(vec_msg, pl_col);  // all-ones column
-		vm_enc.encrypt(pl_col, ct_mat_cols[j]);
-		while (vm_context.get_context_data(ct_mat_cols[j].parms_id())->chain_index() > 1)
-			vm_eval.mod_switch_to_next_inplace(ct_mat_cols[j]);
-	}
-
-	cout << "Minimal context: comp=" << best_comp_pb << " bits x2"
-	     << (best_n_special > 0 ? (" + 60 bits x" + to_string(best_n_special) + " special") : "")
-	     << "\n";
-	cout << "Fresh noise budget: ct_vec=" << vm_dec.invariant_noise_budget(ct_vec) << " bits\n";
-
-	// Compute z[j] = sum_i v[i]*W[i][j] with separate timing.
-	vector<Ciphertext> ct_result(label_size_glb);
-	long long total_mul_us = 0, total_rot_us = 0;
-
-	for (int j = 0; j < label_size_glb; j++) {
-		auto t_mul_start = chrono::high_resolution_clock::now();
-		Ciphertext ct_prod;
-		vm_eval.multiply(ct_vec, ct_mat_cols[j], ct_prod);
-		vm_eval.relinearize_inplace(ct_prod, vm_relin);
-		auto t_mul_end = chrono::high_resolution_clock::now();
-		total_mul_us += chrono::duration_cast<chrono::microseconds>(t_mul_end - t_mul_start).count();
-
-		auto t_rot_start = chrono::high_resolution_clock::now();
-		ct_result[j] = rotation_and_add(vm_context, ct_prod, data_size_glb, 1, vm_eval, vm_gal_keys, 0);
-		auto t_rot_end = chrono::high_resolution_clock::now();
-		total_rot_us += chrono::duration_cast<chrono::microseconds>(t_rot_end - t_rot_start).count();
-	}
-
-	// Verify correctness and report noise.
+	// Correctness: decrypt and read slot[j*data_size_glb] for each j.
+	// With v[i]=1, z[j] = sum_i Y[i][j] = count of datapoints labeled j.
 	Plaintext pl_check;
+	decryptor.decrypt(ct_result, pl_check);
 	vector<uint64_t> msg_check(poly_modulus_degree_glb, 0);
-	vm_dec.decrypt(ct_result[0], pl_check);
-	vm_benc.decode(pl_check, msg_check);
-	cout << "Correctness: slot[0]=" << msg_check[0]
-	     << " (expected " << data_size_glb << ") → "
-	     << (msg_check[0] == (uint64_t)data_size_glb ? "PASS" : "FAIL") << "\n";
-	cout << "Noise budget after multiply+relin+rot: "
-	     << vm_dec.invariant_noise_budget(ct_result[0]) << " bits\n";
-	cout << "Multiply + relin (" << label_size_glb << " cols): "
-	     << total_mul_us << " us  (per col: " << total_mul_us / label_size_glb << " us)\n";
-	cout << "Rotation-and-add (" << label_size_glb << " cols): "
-	     << total_rot_us << " us  (per col: " << total_rot_us / label_size_glb
-	     << " us, ~7 rotations)\n";
-	cout << "Vec-to-mat total: " << (total_mul_us + total_rot_us) << " us\n";
+	batch_encoder.decode(pl_check, msg_check);
+	cout << "Results z[j] at slot[j*" << data_size_glb << "] (= class j count with v=all-ones):\n";
+	uint64_t total_check = 0;
+	for (int j = 0; j < label_size_glb; j++) {
+		cout << "  z[" << j << "] = " << msg_check[(size_t)j * data_size_glb] << "\n";
+		total_check += msg_check[(size_t)j * data_size_glb];
+	}
+	cout << "  sum = " << total_check
+	     << (total_check == (uint64_t)data_size_glb ? " (PASS: equals data_size_glb)" : " (FAIL)") << "\n";
+
+	cout << "Multiply + relin (1 CT×CT for all " << label_size_glb << " cols): "
+	     << mul_us << " us\n";
+	cout << "Rotation-and-add (1 call, ~7 rotations): " << rot_us << " us\n";
+	cout << "Vec-to-mat total: " << (mul_us + rot_us) << " us\n";
 
 	return 0;
 
