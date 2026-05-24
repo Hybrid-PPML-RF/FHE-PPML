@@ -134,6 +134,9 @@ int main(int argc, char* argv[]) {
 		}
 		steps_rot.push_back(i);
 	}
+	// Negative rotations for replicating the vector ciphertext across label_size_glb blocks.
+	for (int j = 1; j < label_size_glb; j++)
+		steps_rot.push_back(-j * data_size_glb);
 
 	int iter = 1;
     while (iter < attr_size_glb) { // round it to a power of 2
@@ -329,34 +332,59 @@ int main(int argc, char* argv[]) {
 	//   new approach: 1 CT×CT + 1 rot_and_add  → (label_size_glb-1) fewer CT×CT multiplies
 
 	cout << "\n--- Vector-to-Matrix Multiplication Layer ---\n";
-	cout << "Vector length: " << data_size_glb << ", Matrix: "
-	     << data_size_glb << "x" << label_size_glb
-	     << " (using real inputs_Y[0])\n";
 
-	// inputs_Y[0] packing: slot[j*data_size_glb + i] = Y[i][j].
-	// After training, check its chain_index and mod-switch to chain_index=1.
+	// Report inputs_Y[0] layout: decode and count encoded datapoints.
+	{
+		Plaintext pl_Y_dbg;
+		decryptor.decrypt(inputs_Y[0], pl_Y_dbg);
+		vector<uint64_t> msg_Y_dbg(poly_modulus_degree_glb, 0);
+		batch_encoder.decode(pl_Y_dbg, msg_Y_dbg);
+		int encoded_dp = 0;
+		for (int i = 0; i < data_size_glb; i++) {
+			for (int j = 0; j < label_size_glb; j++) {
+				if (msg_Y_dbg[(size_t)j * data_size_glb + i] != 0) { encoded_dp++; break; }
+			}
+		}
+		cout << "inputs_Y[0]: " << label_size_glb << " cols x " << data_size_glb
+		     << " rows packed = " << label_size_glb * data_size_glb
+		     << " used slots / " << poly_modulus_degree_glb
+		     << " total;  " << encoded_dp << " / " << data_size_glb
+		     << " datapoints have a non-zero label\n";
+	}
+
+	// Random test vector v[i] in [1, 100].
+	srand(42);
+	vector<uint64_t> v_plain(data_size_glb);
+	for (int i = 0; i < data_size_glb; i++) v_plain[i] = (uint64_t)(rand() % 100) + 1;
+
+	// Encrypt ct_v: slot[i] = v[i] for i=0..data_size_glb-1, zeros elsewhere.
+	// This is the client-provided ciphertext — plaintext is not accessible to the server.
+	vector<uint64_t> v_msg(poly_modulus_degree_glb, 0);
+	for (int i = 0; i < data_size_glb; i++) v_msg[i] = v_plain[i];
+	Plaintext pl_v; batch_encoder.encode(v_msg, pl_v);
+	Ciphertext ct_v; encryptor.encrypt(pl_v, ct_v);
+
+	// Mod-switch ct_v and inputs_Y[0] to chain_index=1.
 	Ciphertext ct_Y = inputs_Y[0];
-	cout << "inputs_Y[0] noise budget: " << decryptor.invariant_noise_budget(ct_Y)
-	     << " bits (chain_index="
-	     << seal_context.get_context_data(ct_Y.parms_id())->chain_index() << ")\n";
 	while (seal_context.get_context_data(ct_Y.parms_id())->chain_index() > 1)
 		evaluator.mod_switch_to_next_inplace(ct_Y);
-	cout << "After mod-switch to chain_index=1: "
-	     << decryptor.invariant_noise_budget(ct_Y) << " bits\n";
+	while (seal_context.get_context_data(ct_v.parms_id())->chain_index() > 1)
+		evaluator.mod_switch_to_next_inplace(ct_v);
+	cout << "Noise budget (chain_index=1): ct_v=" << decryptor.invariant_noise_budget(ct_v)
+	     << " bits, ct_Y=" << decryptor.invariant_noise_budget(ct_Y) << " bits\n";
 
-	// Create ct_v_rep: replicate v[i]=1 across label_size_glb blocks to match inputs_Y layout.
-	// slot[j*data_size_glb + i] = v[i] for j=0..label_size_glb-1, i=0..data_size_glb-1.
-	// (v[i]=1 is the test vector; in production this would be the client's feature vector.)
-	vector<uint64_t> v_rep_msg(poly_modulus_degree_glb, 0);
-	for (int j = 0; j < label_size_glb; j++)
-		for (int i = 0; i < data_size_glb; i++)
-			v_rep_msg[j * data_size_glb + i] = 1;
-	Plaintext pl_v_rep;
-	batch_encoder.encode(v_rep_msg, pl_v_rep);
-	Ciphertext ct_v_rep;
-	encryptor.encrypt(pl_v_rep, ct_v_rep);
-	while (seal_context.get_context_data(ct_v_rep.parms_id())->chain_index() > 1)
-		evaluator.mod_switch_to_next_inplace(ct_v_rep);
+	// Replicate ct_v homomorphically: add right-shifted copies so that
+	// slot[j*data_size_glb + i] = v[i] for all j=0..label_size_glb-1.
+	// Rotation step -(j*data_size_glb) shifts data_size_glb slots to the right by j blocks.
+	auto t_rep_start = chrono::high_resolution_clock::now();
+	Ciphertext ct_v_rep = ct_v;
+	for (int j = 1; j < label_size_glb; j++) {
+		Ciphertext tmp;
+		evaluator.rotate_rows(ct_v, -j * data_size_glb, gal_keys_rot, tmp);
+		evaluator.add_inplace(ct_v_rep, tmp);
+	}
+	auto t_rep_end = chrono::high_resolution_clock::now();
+	long long rep_us = chrono::duration_cast<chrono::microseconds>(t_rep_end - t_rep_start).count();
 
 	// Single CT×CT: slot[j*data_size_glb + i] = v[i] * Y[i][j] for all j,i.
 	auto t_mul_start = chrono::high_resolution_clock::now();
@@ -368,8 +396,7 @@ int main(int argc, char* argv[]) {
 	cout << "Noise budget after multiply+relin: "
 	     << decryptor.invariant_noise_budget(ct_prod) << " bits\n";
 
-	// Single rotation_and_add over data_size_glb elements: sums all label_size_glb groups
-	// simultaneously. Result: slot[j*data_size_glb] = z[j] for j=0..label_size_glb-1.
+	// Single rotation_and_add: z[j] at slot[j*data_size_glb] for all j simultaneously.
 	auto t_rot_start = chrono::high_resolution_clock::now();
 	Ciphertext ct_result = rotation_and_add(seal_context, ct_prod, data_size_glb, 1,
 	                                         evaluator, gal_keys_rot, 0);
@@ -378,25 +405,36 @@ int main(int argc, char* argv[]) {
 	cout << "Noise budget after rotation_and_add: "
 	     << decryptor.invariant_noise_budget(ct_result) << " bits\n";
 
-	// Correctness: decrypt and read slot[j*data_size_glb] for each j.
-	// With v[i]=1, z[j] = sum_i Y[i][j] = count of datapoints labeled j.
-	Plaintext pl_check;
-	decryptor.decrypt(ct_result, pl_check);
+	// Correctness: compare decrypted z[j] against plaintext expected[j] = sum_i v[i]*Y[i][j].
+	// Decode inputs_Y[0] (plaintext known in simulation) to compute ground truth.
+	Plaintext pl_Y_gt; decryptor.decrypt(inputs_Y[0], pl_Y_gt);
+	vector<uint64_t> msg_Y(poly_modulus_degree_glb, 0);
+	batch_encoder.decode(pl_Y_gt, msg_Y);
+	vector<uint64_t> expected_z(label_size_glb, 0);
+	for (int j = 0; j < label_size_glb; j++)
+		for (int i = 0; i < data_size_glb; i++)
+			expected_z[j] = (expected_z[j] + v_plain[i] * msg_Y[(size_t)j * data_size_glb + i]) % p;
+
+	Plaintext pl_check; decryptor.decrypt(ct_result, pl_check);
 	vector<uint64_t> msg_check(poly_modulus_degree_glb, 0);
 	batch_encoder.decode(pl_check, msg_check);
-	cout << "Results z[j] at slot[j*" << data_size_glb << "] (= class j count with v=all-ones):\n";
-	uint64_t total_check = 0;
+	bool all_pass = true;
+	cout << "Correctness check (slot[j*" << data_size_glb << "] vs expected):\n";
 	for (int j = 0; j < label_size_glb; j++) {
-		cout << "  z[" << j << "] = " << msg_check[(size_t)j * data_size_glb] << "\n";
-		total_check += msg_check[(size_t)j * data_size_glb];
+		uint64_t got = msg_check[(size_t)j * data_size_glb];
+		bool ok = (got == expected_z[j]);
+		if (!ok) all_pass = false;
+		cout << "  z[" << j << "] = " << got << "  expected=" << expected_z[j]
+		     << (ok ? "  PASS" : "  FAIL") << "\n";
 	}
-	cout << "  sum = " << total_check
-	     << (total_check == (uint64_t)data_size_glb ? " (PASS: equals data_size_glb)" : " (FAIL)") << "\n";
+	cout << "Overall: " << (all_pass ? "PASS" : "FAIL") << "\n";
 
+	cout << "Replication (" << (label_size_glb-1) << " rotations+adds): " << rep_us << " us\n";
 	cout << "Multiply + relin (1 CT×CT for all " << label_size_glb << " cols): "
 	     << mul_us << " us\n";
 	cout << "Rotation-and-add (1 call, ~7 rotations): " << rot_us << " us\n";
-	cout << "Vec-to-mat total: " << (mul_us + rot_us) << " us\n";
+	cout << "Vec-to-mat total (excl. replication): " << (mul_us + rot_us) << " us\n";
+	cout << "Vec-to-mat total (incl. replication): " << (rep_us + mul_us + rot_us) << " us\n";
 
 	return 0;
 
