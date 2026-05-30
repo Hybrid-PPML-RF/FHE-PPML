@@ -1,0 +1,36 @@
+"""
+Decision tree training — Abspoel, Escudero, Volgushev PoPETs 2021
+Implemented as TreeClassifier in MP-SPDZ's Compiler/decision_tree.py
+(sklearn-compatible interface; supports continuous features natively)
+
+Compile:
+  ./compile.py -R 64 dt_train_abspoel <n_train> <m> <n_levels> <n_classes> [n_threads]
+
+Run:
+  Scripts/ring.sh dt_train_abspoel <n_train> <m> <n_levels> <n_classes> [n_threads]
+"""
+
+from Compiler.decision_tree import TreeClassifier
+
+n_train   = int(program.args[1])
+m         = int(program.args[2])
+n_levels  = int(program.args[3])
+n_classes = int(program.args[4])
+n_threads = int(program.args[5]) if len(program.args) > 5 else 1
+
+print_ln("=== Decision Tree (Abspoel et al. / TreeClassifier) ===")
+print_ln("n_train=%s  m=%s  depth=%s  classes=%s  threads=%s",
+         n_train, m, n_levels, n_classes, n_threads)
+
+X = sint.Matrix(n_train, m)
+y = sint.Array(n_train)
+
+@for_range_opt(n_train)
+def _(i):
+    X[i].assign_vector(sint.get_input_from(0, size=m))
+    y[i] = sint.get_input_from(0)
+
+clf = TreeClassifier(max_depth=n_levels, n_threads=n_threads)
+clf.fit(X, y)
+
+print_ln("=== Training complete ===")

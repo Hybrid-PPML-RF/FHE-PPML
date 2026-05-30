@@ -1,0 +1,60 @@
+"""
+Random forest training — n_trees independent decision trees via Hamada et al.
+Feature bagging: each tree uses ceil(sqrt(m)) features selected at compile time.
+Bootstrap sampling: disabled by default (full dataset per tree, as in paper).
+
+Compile:
+  ./compile.py -R 64 rf_train <n_train> <m> <n_levels> <n_trees> <n_classes> [n_threads]
+
+Run:
+  Scripts/ring.sh rf_train <n_train> <m> <n_levels> <n_trees> <n_classes> [n_threads]
+"""
+
+from Compiler.decision_tree import TreeTrainer
+import random, math
+
+n_train   = int(program.args[1])
+m         = int(program.args[2])
+n_levels  = int(program.args[3])
+n_trees   = int(program.args[4])
+n_classes = int(program.args[5])
+n_threads = int(program.args[6]) if len(program.args) > 6 else 1
+
+# Number of features per tree: ceil(sqrt(m))
+n_feat = max(1, int(math.ceil(math.sqrt(m))))
+
+print_ln("=== Random Forest (Hamada et al. × %s trees) ===", n_trees)
+print_ln("n_train=%s  m=%s  depth=%s  feat_per_tree=%s  classes=%s  threads=%s",
+         n_train, m, n_levels, n_feat, n_classes, n_threads)
+
+# Read full feature matrix from Party 0 once
+X = sint.Matrix(n_train, m)
+y = sint.Array(n_train)
+
+@for_range_opt(n_train)
+def _(i):
+    X[i].assign_vector(sint.get_input_from(0, size=m))
+    y[i] = sint.get_input_from(0)
+
+# Feature subsets are selected at compile time (not private) with fixed seed
+# so results are reproducible.
+random.seed(42)
+for tree_idx in range(n_trees):
+    feats = sorted(random.sample(range(m), min(n_feat, m)))
+    n_f   = len(feats)
+
+    # Build feature-subset matrix for this tree
+    X_sub = sint.Matrix(n_train, n_f)
+
+    @for_range_opt(n_train)
+    def _(i, fs=feats, Xs=X_sub):
+        for j, f in enumerate(fs):
+            Xs[i][j] = X[i][f]
+
+    print_ln("  Tree %s/%s  features=%s", tree_idx + 1, n_trees, feats)
+
+    trainer = TreeTrainer(X_sub, y, n_levels, n_threads=n_threads,
+                          n_classes=n_classes)
+    trainer.fit()
+
+print_ln("=== Random forest training complete (%s trees) ===", n_trees)

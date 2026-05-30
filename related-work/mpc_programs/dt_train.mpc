@@ -1,0 +1,41 @@
+"""
+Decision tree training — Hamada et al. PoPETs 2023
+Implemented as TreeTrainer in MP-SPDZ's Compiler/decision_tree.py
+
+Compile:
+  ./compile.py -R 64 dt_train <n_train> <m> <n_levels> <n_classes> [n_threads]
+
+Run (3-party honest-majority ring, as in the paper's comparison):
+  Scripts/ring.sh dt_train <n_train> <m> <n_levels> <n_classes> [n_threads]
+
+Run (fast local semi-honest 2-party):
+  Scripts/semi2k.sh dt_train <n_train> <m> <n_levels> <n_classes> [n_threads]
+"""
+
+from Compiler.decision_tree import TreeTrainer
+import time
+
+n_train   = int(program.args[1])
+m         = int(program.args[2])
+n_levels  = int(program.args[3])
+n_classes = int(program.args[4])
+n_threads = int(program.args[5]) if len(program.args) > 5 else 1
+
+print_ln("=== Decision Tree (Hamada et al.) ===")
+print_ln("n_train=%s  m=%s  depth=%s  classes=%s  threads=%s",
+         n_train, m, n_levels, n_classes, n_threads)
+
+# Feature matrix and label vector (from Party 0 in simulated setting)
+X = sint.Matrix(n_train, m)
+y = sint.Array(n_train)
+
+@for_range_opt(n_train)
+def _(i):
+    X[i].assign_vector(sint.get_input_from(0, size=m))
+    y[i] = sint.get_input_from(0)
+
+# Train tree
+trainer = TreeTrainer(X, y, n_levels, n_threads=n_threads, n_classes=n_classes)
+trainer.fit()
+
+print_ln("=== Training complete ===")

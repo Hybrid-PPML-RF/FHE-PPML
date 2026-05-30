@@ -51,3 +51,9 @@ target_link_libraries(benchmark SEAL::seal_shared)
 
 add_executable( ppml_matvec main_matvec.cpp )
 target_link_libraries(ppml_matvec SEAL::seal_shared /opt/homebrew/lib/libntl.dylib m /opt/homebrew/lib/libgmp.dylib)
+
+add_executable( test_bgv_chain test_bgv_chain.cpp )
+target_link_libraries(test_bgv_chain SEAL::seal_shared)
+
+add_executable( test_protocol_64bit test_protocol_64bit.cpp )
+target_link_libraries(test_protocol_64bit SEAL::seal_shared)
