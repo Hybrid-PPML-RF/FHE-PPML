@@ -57,3 +57,9 @@ target_link_libraries(test_bgv_chain SEAL::seal_shared)
 
 add_executable( test_protocol_64bit test_protocol_64bit.cpp )
 target_link_libraries(test_protocol_64bit SEAL::seal_shared)
+
+add_executable( extract_ops main_extract_ops.cpp )
+target_link_libraries(extract_ops SEAL::seal_shared /opt/homebrew/lib/libntl.dylib m /opt/homebrew/lib/libgmp.dylib)
+
+add_executable( extract_ops_short main_extract_ops_short.cpp )
+target_link_libraries(extract_ops_short SEAL::seal_shared /opt/homebrew/lib/libntl.dylib m /opt/homebrew/lib/libgmp.dylib)
