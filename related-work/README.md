@@ -11,8 +11,9 @@ cited in *Private Random Forest Training via FHE and MPC*.
 | Abspoel et al. PoPETs 2021 | `TreeClassifier` in MP-SPDZ | [data61/MP-SPDZ](https://github.com/data61/MP-SPDZ) |
 | Bhardwaj et al. CCS 2024 | PR #1449 on fork | [sandy9999/MP-SPDZ](https://github.com/sandy9999/MP-SPDZ), branch `PrivateDT` |
 | Abspoel et al. RF variant | MPyC implementation | [philips-software/random_forest](https://github.com/philips-software/random_forest) |
+| Akavia et al. TOPSEC 2022 | CKKS/SEAL FHE training | [intuit/Decision-Trees-over-FHE](https://github.com/intuit/Decision-Trees-over-FHE) |
 
-**No public code available for:** Hashemi/Shin et al. ESORICS 2024, Adams et al. PoPETs 2022.
+**No public code available for:** Hashemi/Shin et al. ESORICS 2024.
 
 ## Build
 
@@ -28,7 +29,7 @@ the build still succeeds and that algorithm falls back to Hamada.
 
 | Flag | Values | Default | Description |
 |---|---|---|---|
-| `--algorithm` | `hamada` \| `abspoel` \| `bhardwaj` \| `mpyc-rf` | `hamada` | Which protocol to run |
+| `--algorithm` | `hamada` \| `abspoel` \| `bhardwaj` \| `mpyc-rf` \| `akavia` | `hamada` | Which protocol to run |
 | `--dataset` | `iris` \| `wine` \| `cancer` \| `digits` | `iris` | UCI dataset |
 | `--depth` | integer | `6` | Maximum tree depth |
 | `--num-trees` | integer | `1` | Number of trees (`>1` trains a random forest) |
@@ -38,6 +39,8 @@ the build still succeeds and that algorithm falls back to Hamada.
 **Protocols:**
 - `ring` — 3-party honest-majority replicated secret sharing over a ring (matches the paper's comparison setting)
 - `semi2k` — 2-party semi-honest over Z_{2^k} (faster, weaker security, good for local timing)
+
+`--protocol` is ignored for `--algorithm akavia` (FHE-only, no MPC).
 
 ## Examples
 

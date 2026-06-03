@@ -6,11 +6,12 @@
 #   docker run <image> [OPTIONS]
 #
 # Options:
-#   --algorithm  hamada | abspoel | bhardwaj | mpyc-rf
+#   --algorithm  hamada | abspoel | bhardwaj | mpyc-rf | akavia
 #                  hamada   : Hamada et al.  PoPETs 2023  (MP-SPDZ TreeTrainer)
 #                  abspoel  : Abspoel et al. PoPETs 2021  (MP-SPDZ TreeClassifier)
 #                  bhardwaj : Bhardwaj et al. CCS 2024    (MP-SPDZ fork PR #1449)
 #                  mpyc-rf  : Abspoel et al. RF variant   (philips-software/MPyC)
+#                  akavia   : Akavia et al.  TOPSEC 2022  (CKKS/SEAL, FHE-only)
 #   --dataset    iris | wine | cancer | digits  (default: iris)
 #   --depth      tree depth  (default: 6)
 #   --num-trees  number of trees; >1 uses rf_train.mpc  (default: 1)
@@ -69,6 +70,18 @@ echo "  num_trees : $NUM_TREES"
 echo "  protocol  : $PROTOCOL"
 echo "  threads   : $THREADS"
 echo "============================================================"
+
+# ── Akavia et al.: CKKS/SEAL FHE decision tree (no MPC) ─────────────────────
+if [[ "$ALGORITHM" == "akavia" ]]; then
+    if [[ "$DATASET" == "digits" && "$DEPTH" -gt 4 ]]; then
+        echo "[WARN] Akavia et al. on digits with depth>4 may take many hours." >&2
+    fi
+    cd /opt/decision-trees-fhe/build
+    ./fhe_random_forest \
+        --dataset "$DATASET" \
+        --depth   "$DEPTH"
+    exit 0
+fi
 
 # ── MPyC random forest path (separate, no MP-SPDZ) ──────────────────────────
 if [[ "$ALGORITHM" == "mpyc-rf" ]]; then

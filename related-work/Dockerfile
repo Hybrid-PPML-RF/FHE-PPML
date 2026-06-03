@@ -6,8 +6,9 @@
 #        • Abspoel et al. PoPETs 2021 (TreeClassifier in decision_tree.py)
 #   2. Bhardwaj et al. CCS 2024       — PR #1449 on sandy9999/MP-SPDZ fork
 #   3. philips-software/random_forest — MPyC RF (Abspoel et al. RF variant)
+#   4. Akavia et al. TOPSEC 2022      — intuit/Decision-Trees-over-FHE (CKKS/SEAL)
 #
-# NOT available as code: Hashemi/Shin et al. ESORICS 2024, Adams et al. 2022
+# NOT available as code: Hashemi/Shin et al. ESORICS 2024
 # ============================================================================
 
 FROM ubuntu:22.04
@@ -21,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgmp-dev libntl-dev libsodium-dev libssl-dev \
         libtool m4 python3 python3-dev python3-pip \
         texinfo yasm curl wget \
+        libdpkg-perl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --no-cache-dir scikit-learn pandas numpy mpyc
@@ -48,6 +50,28 @@ RUN git clone --depth 1 --branch PrivateDT \
 # ── Clone philips-software/random_forest (MPyC, Abspoel RF) ──────────────
 WORKDIR /opt/mpyc-rf
 RUN git clone --depth 1 https://github.com/philips-software/random_forest.git .
+
+# ── Build SEAL 4.0.0 (required by Akavia et al.) ─────────────────────────
+RUN git clone --depth 1 --branch 4.0.0 \
+        https://github.com/microsoft/SEAL.git /tmp/seal400 \
+    && cmake -S /tmp/seal400 -B /tmp/seal400/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DSEAL_BUILD_TESTS=OFF \
+        -DSEAL_BUILD_EXAMPLES=OFF \
+    && cmake --build /tmp/seal400/build --parallel $(nproc) \
+    && cmake --install /tmp/seal400/build \
+    && rm -rf /tmp/seal400
+
+# ── Build Akavia et al. Decision-Trees-over-FHE ───────────────────────────
+RUN git clone --depth 1 \
+        https://github.com/intuit/Decision-Trees-over-FHE.git \
+        /opt/decision-trees-fhe
+COPY akavia_main.cpp         /opt/decision-trees-fhe/src/main.cpp
+COPY akavia_CMakeLists.txt   /opt/decision-trees-fhe/CMakeLists.txt
+RUN cmake -S /opt/decision-trees-fhe -B /opt/decision-trees-fhe/build \
+        -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /opt/decision-trees-fhe/build --parallel $(nproc) \
+        --target fhe_random_forest
 
 # ── Install our orchestration scripts ────────────────────────────────────
 WORKDIR /opt/related-work
