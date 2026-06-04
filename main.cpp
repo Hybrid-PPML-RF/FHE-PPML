@@ -296,7 +296,7 @@ int main(int argc, char* argv[]) {
 		}
 	}
 
-	cout << "Final noise budget (partition label): " << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << " bits\n";
+	// cout << "Final noise budget (partition label): " << decryptor.invariant_noise_budget(partition_labels_for_node[0][0][0][0]) << " bits\n";
 
 	// simulate the labeling for leaf nodes...
 	cout << "Calculating the labeling for leaf nodes...\n";
@@ -307,7 +307,7 @@ int main(int argc, char* argv[]) {
 		}
 		evaluator.mod_switch_to_inplace(tmp, selection_vector[selection_vector.size()-3].parms_id());
 		evaluator.multiply_inplace(tmp, selection_vector[selection_vector.size()-3]);
-		// if (i == 0) cout << "	" << decryptor.invariant_noise_budget(tmp) << endl;
+		if (i == 0) cout << "	" << decryptor.invariant_noise_budget(tmp) << endl;
 		evaluator.relinearize_inplace(tmp, relin_keys);
 	}
 
