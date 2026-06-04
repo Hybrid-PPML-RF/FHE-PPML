@@ -72,14 +72,8 @@ int main(int argc, char* argv[]) {
 	bgv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
 
 	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
-														60, 60, 60, 60, 60, 60, 60
+														34, 34, 34, 34, 34, 34, 34, 34
 													});
-
-	if (dataset == 4 && depth_glb == 6) {
-		auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
-															60, 30, 60, 60, 60, 60, 60
-														});
-	}
 
 	bgv_params.set_coeff_modulus(coeff_modulus);
 	bgv_params.set_plain_modulus(p);

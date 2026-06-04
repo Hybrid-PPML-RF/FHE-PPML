@@ -418,12 +418,13 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
             for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
                 for (int i = tt * thread_chunk_size_1; i < end_1; i++) {
                     Ciphertext tmp = preprocessed_partitions[cnt][i];
-                    if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(selection_vector.parms_id())->chain_index()) {
-                        evaluator.mod_switch_to_inplace(selection_vector, tmp.parms_id());
+                    Ciphertext sel_local = selection_vector;
+                    if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(sel_local.parms_id())->chain_index()) {
+                        evaluator.mod_switch_to_inplace(sel_local, tmp.parms_id());
                     } else {
-                        evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                        evaluator.mod_switch_to_inplace(tmp, sel_local.parms_id());
                     }
-                    evaluator.multiply(tmp, selection_vector, partitions_for_node[cnt][i]);
+                    evaluator.multiply(tmp, sel_local, partitions_for_node[cnt][i]);
                     evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
                     if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partitions_for_node[cnt][i].scale()) > 60) {
                         // if (cnt == 0 && i == 0) cout << "   Now switch for data1: " << log2(tmp.scale()) << ", " << log2(selection_vector.scale()) << ", " << context.get_context_data(partitions_for_node[cnt][i].parms_id())->chain_index() <<\
@@ -464,13 +465,14 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                 for (int l = 0; l < label_size_glb; l++) {
                     for (int i = tt * thread_chunk_size_2; i < end_2; i++) {
                         Ciphertext tmp = preprocessed_partitioned_labels[cnt][l][i];
-                        if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(selection_vector.parms_id())->chain_index()) {
-                            evaluator.mod_switch_to_inplace(selection_vector, tmp.parms_id());
+                        Ciphertext sel_local = selection_vector;
+                        if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(sel_local.parms_id())->chain_index()) {
+                            evaluator.mod_switch_to_inplace(sel_local, tmp.parms_id());
                         } else {
-                            evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                            evaluator.mod_switch_to_inplace(tmp, sel_local.parms_id());
                         }
 
-                        evaluator.multiply(tmp, selection_vector, partition_labels_for_node[cnt][l][i]);
+                        evaluator.multiply(tmp, sel_local, partition_labels_for_node[cnt][l][i]);
                         evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
                         if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partition_labels_for_node[cnt][l][i].scale()) > 60) {
                             // if (cnt == 0 && i == 0 && l == 0) cout << "   Now switch for label1: " << log2(partition_labels_for_node[cnt][l][i].scale()) << " --> ";
@@ -500,13 +502,14 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
             for (int i = 0; i < (int) preprocessed_partitions[0].size(); i++) {
                 // cout << "       " << cnt << ", " << i << endl;
                 Ciphertext tmp = preprocessed_partitions[cnt][i];
-                if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(selection_vector.parms_id())->chain_index()) {
-                    evaluator.mod_switch_to_inplace(selection_vector, tmp.parms_id());
+                Ciphertext sel_local = selection_vector;
+                if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(sel_local.parms_id())->chain_index()) {
+                    evaluator.mod_switch_to_inplace(sel_local, tmp.parms_id());
                 } else {
-                    evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                    evaluator.mod_switch_to_inplace(tmp, sel_local.parms_id());
                 }
 
-                evaluator.multiply(tmp, selection_vector, partitions_for_node[cnt][i]);
+                evaluator.multiply(tmp, sel_local, partitions_for_node[cnt][i]);
                 evaluator.relinearize_inplace(partitions_for_node[cnt][i], relin_keys);
 
                 if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partitions_for_node[cnt][i].scale()) > 60) {
@@ -539,12 +542,13 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                 for (int i = 0; i < (int) preprocessed_partitioned_labels.size(); i++) {
                     // cout << "       " << cnt << ", " << l << ", " << i << endl;
                     Ciphertext tmp = preprocessed_partitioned_labels[cnt][l][i];
-                    if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(selection_vector.parms_id())->chain_index()) {
-                        evaluator.mod_switch_to_inplace(selection_vector, tmp.parms_id());
+                    Ciphertext sel_local = selection_vector;
+                    if (context.get_context_data(tmp.parms_id())->chain_index() < context.get_context_data(sel_local.parms_id())->chain_index()) {
+                        evaluator.mod_switch_to_inplace(sel_local, tmp.parms_id());
                     } else {
-                        evaluator.mod_switch_to_inplace(tmp, selection_vector.parms_id());
+                        evaluator.mod_switch_to_inplace(tmp, sel_local.parms_id());
                     }
-                    evaluator.multiply(tmp, selection_vector, partition_labels_for_node[cnt][l][i]);
+                    evaluator.multiply(tmp, sel_local, partition_labels_for_node[cnt][l][i]);
                     evaluator.relinearize_inplace(partition_labels_for_node[cnt][l][i], relin_keys);
 
                     if (context.key_context_data()->parms().scheme() == scheme_type::ckks && (int)log2(partition_labels_for_node[cnt][l][i].scale()) > 60) {
