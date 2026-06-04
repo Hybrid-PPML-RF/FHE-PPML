@@ -690,11 +690,11 @@ void simulate_random_select_sqrt_attributes(vector<vector<Ciphertext>>& preproce
                                             SEALContext& context, Evaluator& evaluator, GaloisKeys& gal_keys,
                                             bool multi_thread = false) {
     int packed = 2 * (floor((double)(poly_modulus_degree_glb/2) / (double) (data_size_glb*value_size_glb)));
-    // int num_ct = ceil((double) (sqrt_attr_size_glb) / (double) packed );
+    int num_ct = ceil((double) (sqrt_attr_size_glb) / (double) packed );
     // cout << "   repack number of ct: " << num_ct << endl;;
     
     // direct simulation for digits...
-    int num_ct = 8;
+    // int num_ct = 8;
 
 
     random_preprocessed_partitions.resize(num_ct);
