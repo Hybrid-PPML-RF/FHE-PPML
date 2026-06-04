@@ -72,7 +72,7 @@ int main(int argc, char* argv[]) {
 	bgv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
 
 	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
-														34, 34, 34, 34, 34, 34, 34, 34
+														34, 34, 34, 34, 34, 34, 34, 34, 34
 													});
 
 	bgv_params.set_coeff_modulus(coeff_modulus);
