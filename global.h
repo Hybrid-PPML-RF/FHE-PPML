@@ -42,6 +42,6 @@ prng_seed_type seed_glb;
 
 int depth_glb = 6; // decision tree depth
 
-int num_cores = 32;
+int num_cores = 4;
 
 double scale = pow(2.0, 30);
