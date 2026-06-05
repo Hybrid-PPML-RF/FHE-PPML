@@ -43,5 +43,5 @@ include_directories( ${OPENMP_INCLUDES} )
 ###     link_libraries( ${PALISADE_SHARED_LIBRARIES} )
 ### endif()
 
-add_executable( ppml main.cpp )
+add_executable( ppml main_integrity.cpp )
 target_link_libraries(ppml SEAL::seal ntl m gmp)

@@ -305,8 +305,8 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
 
     int thread_chunk = max(1, (int)ceil((float)val_size / (float)num_cores));
 
-    NTL::SetNumThreads(num_cores);
-    NTL_EXEC_RANGE(num_cores, first, last);
+    NTL::SetNumThreads(min(num_cores, val_size));
+    NTL_EXEC_RANGE(min(num_cores, val_size), first, last);
     for (int tt = first; tt < last; tt++) {
         Ciphertext tmp;
         for (int i = tt*thread_chunk; i < min(val_size, (tt+1)*thread_chunk); i++) {
@@ -347,7 +347,7 @@ void preprocess_all_threshold(vector<Ciphertext>& inputs_X, vector<Ciphertext>& 
     // }
     
     thread_chunk = max(1, (int)ceil((float) partitioned.size() / (float) num_cores));
-    NTL_EXEC_RANGE(num_cores, first, last);
+    NTL_EXEC_RANGE(min(num_cores, val_size), first, last);
     for (int tt = first; tt < last; tt++) {
         for (int cnt = tt*thread_chunk; cnt < min((int) partitioned.size(), (tt+1)*thread_chunk); cnt++) {
             for (int i = 0; i < (int) val_size; i++) {
@@ -408,11 +408,13 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
     // multi_thread = false;
 
     if (multi_thread) {
-        NTL::SetNumThreads(num_cores);
-        int thread_chunk_size_1 = (int) preprocessed_partitions[0].size() / num_cores;
-        int thread_chunk_size_2 = (int) preprocessed_partitioned_labels[0][0].size() / num_cores;
+        const size_t partition_size = preprocessed_partitions[0].size();
+        const long long end = min(static_cast<int>(partition_size), num_cores);
+        NTL::SetNumThreads(end);
+        int thread_chunk_size_1 = (int) preprocessed_partitions[0].size() / end;
+        int thread_chunk_size_2 = (int) preprocessed_partitioned_labels[0][0].size() / end;
 
-        NTL_EXEC_RANGE(num_cores, first, last);
+        NTL_EXEC_RANGE(end, first, last);
         for (int tt = first; tt < last; tt++) {
             int end_1 = (tt == last-1) ? (int) preprocessed_partitions[0].size() : (tt+1) * thread_chunk_size_1;
             for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
@@ -458,7 +460,7 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
         // this bug is really something.... somehow if I have two different for loops inside this multi-thread, then the second for loop would have only one thread executing
         // the last chunk, i.e., for 4 cores, I would always have first = 3 for the second for loop, ridiculous!!!!
         // so I split them into two separate thread pool, small overhead for spinning up the pool, but..... WHY...
-        NTL_EXEC_RANGE(num_cores, first, last);
+        NTL_EXEC_RANGE(end, first, last);
         for (int tt = first; tt < last; tt++) {
             int end_2 = (tt == last-1) ? (int) preprocessed_partitioned_labels[0][0].size() : (tt+1) * thread_chunk_size_2;
             for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt++) {
@@ -719,12 +721,12 @@ void simulate_random_select_sqrt_attributes(vector<vector<Ciphertext>>& preproce
 
     chrono::high_resolution_clock::time_point time_start, time_end;
     time_start = chrono::high_resolution_clock::now();
-
+   
 
     if (multi_thread) {
-        NTL::SetNumThreads(num_cores);
-        NTL_EXEC_RANGE(num_cores, first, last);
-        int thread_chunk_size_1 = sqrt_attr_size_glb / num_cores;
+        NTL::SetNumThreads(min(sqrt_attr_size_glb, num_cores));
+        NTL_EXEC_RANGE(min(sqrt_attr_size_glb, num_cores), first, last);
+        int thread_chunk_size_1 = sqrt_attr_size_glb / min(sqrt_attr_size_glb, num_cores);
         for (int tt = first; tt < last; tt++) {
             int end = (tt == last-1) ? (int) sqrt_attr_size_glb : (tt+1) * thread_chunk_size_1;
             for (int ii = tt * thread_chunk_size_1; ii < end; ii++) {

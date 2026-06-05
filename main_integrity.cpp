@@ -205,7 +205,8 @@ int main(int argc, char* argv[]) {
 
 	time_start = chrono::high_resolution_clock::now();
 	for (int d = 0; d < depth_glb; d++) { // for each level in the tree, except the root
-		bool multi_thread = pow(2,d) >= 4;
+		const long long total = 1LL << d;  // integer bit shift, exact and fast
+		bool multi_thread = total > sqrt_attr_size_glb;
 
 		cout << "	Training for level " << d << " with " << pow(2,d) << " nodes...\n";
 
@@ -218,9 +219,11 @@ int main(int argc, char* argv[]) {
 		}
 
 		if (multi_thread) {
-			NTL::SetNumThreads(num_cores);
-			int thread_chunk_size = pow(2,d) / num_cores;
-			NTL_EXEC_RANGE(num_cores, first, last);
+			
+			const long long end = min(total, static_cast<long long>(num_cores));
+			const int thread_chunk_size = max(1, static_cast<int>(ceil(static_cast<double>(total) / end)));
+			NTL::SetNumThreads(end);
+			NTL_EXEC_RANGE(end, first, last);
 			for (int tt = first; tt < last; tt++) {
 				for (int nd = tt*thread_chunk_size ; nd < (tt+1)*thread_chunk_size; nd++) {
 
@@ -229,12 +232,12 @@ int main(int argc, char* argv[]) {
 					vector<vector<Ciphertext>> random_preprocessed_partitions;
 					vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
 					simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels,
-														   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
-														   seal_context, evaluator, gal_keys_rot, !multi_thread);
+															random_preprocessed_partitions, random_reprocessed_partitioned_labels,
+															seal_context, evaluator, gal_keys_rot, !multi_thread);
 
 					perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
-											   partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
-											   relin_keys, gal_keys_rot, !multi_thread);
+												partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
+												relin_keys, gal_keys_rot, !multi_thread);
 
 					if (d != depth_glb-1) {
 						update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
@@ -252,11 +255,11 @@ int main(int argc, char* argv[]) {
 				vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
 				simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels,
 													   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
-													   seal_context, evaluator, gal_keys_rot, !multi_thread);
+													   seal_context, evaluator, gal_keys_rot, multi_thread);
 
 				perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
 										partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
-										relin_keys, gal_keys_rot, !multi_thread);
+										relin_keys, gal_keys_rot, multi_thread);
 
 				if (d != depth_glb-1) {
 					update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
@@ -264,11 +267,15 @@ int main(int argc, char* argv[]) {
 				}
 			}
 		}
+
 	}
 
-	// simulate the labeling for leaf nodes...
+	// simulate the labeling for leaf nodes for multi-threading...
 	cout << "Calculating the labeling for leaf nodes...\n";
-	for (int i = 0; i < pow(2, depth_glb-1) / num_cores; i++) {
+	const long long power_term = 1LL << (depth_glb - 1);  // integer bit shift, no pow()
+	const long long divisor = min(power_term, static_cast<long long>(num_cores));
+	const int bound = static_cast<int>(power_term / divisor); 
+	for (int i = 0; i < bound; i++) {
 		Ciphertext tmp = preprocessed_partitioned_labels[0][0][0];
 		if (selection_vector[selection_vector.size()-3].parms_id() != seal_context.last_parms_id()) {
 			evaluator.mod_switch_to_next_inplace(selection_vector[selection_vector.size()-3]);
@@ -282,14 +289,16 @@ int main(int argc, char* argv[]) {
 	Plaintext pll;
 	pll.resize(poly_modulus_degree_glb);
 	pll.parms_id() = parms_id_zero;
-	for (int i = 0; i < (int) poly_modulus_degree_glb; i++) {
+	for (int i = 0; i < (int) poly_modulus_degree_glb/2; i++) {
 		pll.data()[i] = 1;
 	}
 
 	cout << "Simulate the packing and extraction...\n";
 	for (int d = 0; d < depth_glb - 2; d++) {
 		for (int k = 0; k < pow(2,d); k++) {
-			for (int i = 0; i < ceil((double) (sqrt_attr_size_glb * (label_size_glb+1) * (2*value_size_glb-1)) / (double) num_cores); i++) {
+			int extraction_count = (sqrt_attr_size_glb * (label_size_glb+1) * (2*value_size_glb-1));
+			int thread_chunk = ceil((double) extraction_count / (double) num_cores);
+			for (int i = 0; i < max(1, thread_chunk); i++) {
 				Ciphertext tmp = partitions_for_node[0][0][0];
 				if (tmp.parms_id() != seal_context.last_parms_id()) {
 					evaluator.mod_switch_to_next_inplace(tmp);
@@ -303,7 +312,8 @@ int main(int argc, char* argv[]) {
 
 	for (int d = 0; d < depth_glb - 2; d++) {
 		for (int k = 0; k < pow(2,d); k++) {
-			for (int i = 0; i < ceil((double) label_size_glb / (double) num_cores); i++) {
+			const int bound = max(1, static_cast<int>(ceil(static_cast<double>(label_size_glb) / static_cast<double>(num_cores))));
+			for (int i = 0; i < bound; i++) {
 				Ciphertext tmp = partition_labels_for_node[0][0][0][0];
 				if (tmp.parms_id() != seal_context.last_parms_id()) {
 					evaluator.mod_switch_to_next_inplace(tmp);
@@ -319,6 +329,11 @@ int main(int argc, char* argv[]) {
 	cout << "Training + labeling + packing total runtime: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
 
 
+
+
+	chrono::high_resolution_clock::time_point time_int_start, time_int_end;
+    long int_time = 0;
+
 	// =========================================================
 	// INTEGRITY CHECK: Y' x C' pipeline (one CT×CT, chain 1→0)
 	// =========================================================
@@ -326,13 +341,17 @@ int main(int argc, char* argv[]) {
 
 	int fill_n = 4 * attr_size_glb;  // number of copies: e.g. 16 for iris
 
-	// Mod switch inputs_Y[0] to chain 3 (CT×CT needs room: chain 3→2, then mod-switch to 0)
+
+	time_int_start = chrono::high_resolution_clock::now();
 	Ciphertext ct_Y_int = inputs_Y[0];
 	while ((int)seal_context.get_context_data(ct_Y_int.parms_id())->chain_index() > 3)
 		evaluator.mod_switch_to_next_inplace(ct_Y_int);
+	time_int_end = chrono::high_resolution_clock::now();
+	int_time += chrono::duration_cast<chrono::microseconds>(time_int_end - time_int_start).count();
+	
+	
 	cout << "inputs_Y[0] budget at chain 3: " << decryptor.invariant_noise_budget(ct_Y_int) << " bits\n";
 
-	// Binary-doubling fill: creates n copies of a blk-slot block via log2(n) rotation+add steps.
 	auto rot_fill = [&](Ciphertext ct, int blk, int n) -> Ciphertext {
 		int itr = 1;
 		while (itr < n) itr *= 2;
@@ -350,30 +369,43 @@ int main(int argc, char* argv[]) {
 	//   For each label i, extract [data_size*i, data_size*(i+1)) from ct_Y_int via CT×PT mask,
 	//   shift block to slot 0, fill to fill_n copies via log2(fill_n) rotation+add,
 	//   then sum across all labels → Y'.
+
+	time_int_start = chrono::high_resolution_clock::now();
 	Ciphertext Y_prime;
 	bool yp_init = false;
-	for (int i = 0; i < label_size_glb; i++) {
+	NTL::SetNumThreads(min(label_size_glb, num_cores));
+	int thread_chunk_size = max(1, label_size_glb / num_cores);
+	NTL_EXEC_RANGE(min(label_size_glb, num_cores), first, last);
+	for (int tt = first; tt < last; tt++) {
+		for (int nd = tt*thread_chunk_size ; nd < (tt+1)*thread_chunk_size; nd++) {
 		// NTT-free binary mask selecting [data_size*i, data_size*(i+1))
-		Plaintext mask_pl;
-		mask_pl.resize(poly_modulus_degree_glb);
-		mask_pl.parms_id() = parms_id_zero;
-		for (int j = 0; j < (int)poly_modulus_degree_glb; j++)
-			mask_pl.data()[j] = (j >= data_size_glb * i && j < data_size_glb * (i + 1)) ? 1 : 0;
-		Ciphertext extracted;
-		evaluator.multiply_plain(ct_Y_int, mask_pl, extracted);
+			Plaintext mask_pl;
+			mask_pl.resize(poly_modulus_degree_glb);
+			mask_pl.parms_id() = parms_id_zero;
+			for (int j = 0; j < (int)poly_modulus_degree_glb; j++)
+				mask_pl.data()[j] = (j >= data_size_glb * nd && j < data_size_glb * (nd + 1)) ? 1 : 0;
+			Ciphertext extracted;
+			evaluator.multiply_plain(ct_Y_int, mask_pl, extracted);
 
-		// Shift block to slot 0: rotate rows left by data_size*i
-		if (i > 0)
-			evaluator.rotate_rows_inplace(extracted,
-				data_size_glb * i % (poly_modulus_degree_glb / 2), gal_keys_rot);
+			// Shift block to slot 0: rotate rows left by data_size*i
+			if (nd > 0)
+				evaluator.rotate_rows_inplace(extracted,
+					data_size_glb * nd % (poly_modulus_degree_glb / 2), gal_keys_rot);
 
-		// Fill to fill_n copies
-		Ciphertext filled = rot_fill(extracted, data_size_glb, fill_n);
+			// Fill to fill_n copies
+			Ciphertext filled = rot_fill(extracted, data_size_glb, fill_n);
 
-		if (!yp_init) { Y_prime = filled; yp_init = true; }
-		else           evaluator.add_inplace(Y_prime, filled);
+			if (!yp_init) { Y_prime = filled; yp_init = true; }
+			else           evaluator.add_inplace(Y_prime, filled);
+		}
 	}
+	NTL_EXEC_RANGE_END;
+	evaluator.mod_switch_to_next_inplace(Y_prime);
+	time_int_end = chrono::high_resolution_clock::now();
+	int_time += chrono::duration_cast<chrono::microseconds>(time_int_end - time_int_start).count();
+
 	cout << "Y' budget: " << decryptor.invariant_noise_budget(Y_prime) << " bits\n";
+	
 
 	// Step 2: C'
 	//   Fresh ciphertext with random data in [0, data_size_glb), mod-switched to chain 1,
@@ -387,33 +419,53 @@ int main(int argc, char* argv[]) {
 		batch_encoder.encode(cp_data, cp_pl);
 		Ciphertext C_prime;
 		encryptor.encrypt(cp_pl, C_prime);
-		while ((int)seal_context.get_context_data(C_prime.parms_id())->chain_index() > 3)
+
+		time_int_start = chrono::high_resolution_clock::now();
+		while ((int)seal_context.get_context_data(C_prime.parms_id())->chain_index() > 2)
 			evaluator.mod_switch_to_next_inplace(C_prime);
 		C_prime = rot_fill(C_prime, data_size_glb, fill_n);
+		time_int_end = chrono::high_resolution_clock::now();
+		int_time += chrono::duration_cast<chrono::microseconds>(time_int_end - time_int_start).count();
+		
+		
 		cout << "C' budget: " << decryptor.invariant_noise_budget(C_prime) << " bits\n";
 
 		// Step 3: H = Y' × C'  (the one CT×CT in this pipeline)
+		time_int_start = chrono::high_resolution_clock::now();
 		Ciphertext H;
 		evaluator.multiply(Y_prime, C_prime, H);
 		evaluator.relinearize_inplace(H, relin_keys);
-		cout << "H budget (CT×CT + relin, chain 2): " << decryptor.invariant_noise_budget(H) << " bits\n";
+		evaluator.mod_switch_to_next_inplace(H);
+		time_int_end = chrono::high_resolution_clock::now();
+		int_time += chrono::duration_cast<chrono::microseconds>(time_int_end - time_int_start).count();
 
+		cout << "H budget (CT×CT + relin, chain 2): " << decryptor.invariant_noise_budget(H) << " bits\n";
 		// Step 4: H' = rotation_and_add(H, data_size, chunk=1)
 		//   Sums each data_size-slot block down to one value per block.
+		time_int_start = chrono::high_resolution_clock::now();
 		Ciphertext H_prime = rotation_and_add(seal_context, H,
 		                                      data_size_glb, 1, evaluator, gal_keys_rot, 0);
+		time_int_end = chrono::high_resolution_clock::now();
+		int_time += chrono::duration_cast<chrono::microseconds>(time_int_end - time_int_start).count();
+
 		cout << "H' budget: " << decryptor.invariant_noise_budget(H_prime) << " bits\n";
 
 		// Step 5: H'' = rotation_and_add(H', data_size*attr_size, chunk=data_size)
 		//   Sums attr_size consecutive per-attribute blocks into one.
+		time_int_start = chrono::high_resolution_clock::now();
 		Ciphertext H_pp = rotation_and_add(seal_context, H_prime,
 		                                   data_size_glb * attr_size_glb, data_size_glb,
 		                                   evaluator, gal_keys_rot, 0);
-
-		// Mod switch to chain 0 and report final budget
 		evaluator.mod_switch_to_inplace(H_pp, seal_context.last_parms_id());
+		time_int_end = chrono::high_resolution_clock::now();
+		int_time += chrono::duration_cast<chrono::microseconds>(time_int_end - time_int_start).count();
+
 		cout << "H'' final noise budget (chain 0): " << decryptor.invariant_noise_budget(H_pp) << " bits\n";
+		
 	}
+
+
+	cout << "Integrity Runtime for all : " << int_time * (depth_glb+1) << " ms." << endl;
 
 	return 0;
 
