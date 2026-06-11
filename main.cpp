@@ -219,6 +219,8 @@ int main(int argc, char* argv[]) {
 	vector<vector<vector<Ciphertext>>> partitions_for_node;
 	vector<vector<vector<vector<Ciphertext>>>> partition_labels_for_node;
 
+	long wwww = 0;
+
 	time_start = chrono::high_resolution_clock::now();
 	for (int d = 0; d < depth_glb; d++) { // for each level in the tree, except the root
 		bool multi_thread = pow(2,d) >= 4;
@@ -247,9 +249,12 @@ int main(int argc, char* argv[]) {
 					// sum up each data_size chunk to a single value, and then square it
 					vector<vector<Ciphertext>> random_preprocessed_partitions;
 					vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
+					sss = = chrono::high_resolution_clock::now();
 					simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels, 
 														   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
 														   seal_context, evaluator, gal_keys_rot, !multi_thread);
+					eee = = chrono::high_resolution_clock::now();
+					wwww+=chrono::duration_cast<chrono::microseconds>(eee - sss).count();
 
 					perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
 											   partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
@@ -278,9 +283,12 @@ int main(int argc, char* argv[]) {
 				// based on previous parent partition, threshold attribute value, each #data_size chunk record 
 				vector<vector<Ciphertext>> random_preprocessed_partitions;
 				vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
+				sss = = chrono::high_resolution_clock::now();
 				simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels, 
 													   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
 													   seal_context, evaluator, gal_keys_rot, !multi_thread);
+				eee = = chrono::high_resolution_clock::now();
+				wwww+=chrono::duration_cast<chrono::microseconds>(eee - sss).count();
 													   
 				perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
 										partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,

@@ -397,14 +397,20 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                                 Ciphertext& selection_vector, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys,
                                 bool multi_thread = false) {
 
+    cout << preprocessed_partitions.size() << " " << preprocessed_partitions[0].size() << endl;
+    cout << preprocessed_partitioned_labels.size() << " " << preprocessed_partitioned_labels[0].size() << " " << preprocessed_partitioned_labels[0][0].size() << endl;
+    
+    partitions_for_node.resize((int) preprocessed_partitions.size());
     for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
         partitions_for_node[cnt].resize((int) preprocessed_partitions[cnt].size());
     }
-
+    partition_labels_for_node.resize((int) preprocessed_partitioned_labels.size());
     for (int cnt = 0; cnt < (int) preprocessed_partitioned_labels.size(); cnt ++) {
         partition_labels_for_node[cnt].resize(label_size_glb, vector<Ciphertext>((int) preprocessed_partitioned_labels[0][0].size()));
     }
 
+
+    cout << "HHHHHHHHHHHH" << endl;
     // multi_thread = false;
 
     if (multi_thread) {
@@ -693,7 +699,7 @@ void simulate_random_select_sqrt_attributes(vector<vector<Ciphertext>>& preproce
                                             bool multi_thread = false, bool is_digits = false) {
     int packed = 2 * (floor((double)(poly_modulus_degree_glb/2) / (double) (data_size_glb*value_size_glb)));
     int num_ct = is_digits ? 8 : ceil((double) (sqrt_attr_size_glb) / (double) packed );
-    // cout << "   repack number of ct: " << num_ct << endl;;
+    cout << "   repack number of ct: " << num_ct << endl;
     
     // direct simulation for digits...
     // int num_ct = 8;
@@ -706,22 +712,21 @@ void simulate_random_select_sqrt_attributes(vector<vector<Ciphertext>>& preproce
         for (int j = 0; j < (int) random_preprocessed_partitions[i].size(); j++) {
             random_preprocessed_partitions[i][j] = preprocessed_partitions[0][j];
         }
-        random_preprocessed_partitioned_labels[i].resize(preprocessed_partitioned_labels[i].size());
+        random_preprocessed_partitioned_labels[i].resize(preprocessed_partitioned_labels[0].size());
         for (int j = 0; j < (int) random_preprocessed_partitioned_labels[i].size(); j++) {
-            random_preprocessed_partitioned_labels[i][j].resize((int)preprocessed_partitioned_labels[i][j].size());
+            random_preprocessed_partitioned_labels[i][j].resize((int)preprocessed_partitioned_labels[0][j].size());
             for (int k = 0; k < (int) random_preprocessed_partitioned_labels[i][j].size(); k++) {
                 random_preprocessed_partitioned_labels[i][j][k] = preprocessed_partitioned_labels[0][j][k];
             }
         }
     }
 
-    if (sqrt_attr_size_glb == attr_size_glb) { // no need for iris...
+    if (sqrt_attr_size_glb == attr_size_glb) {
         return;
     }
 
     chrono::high_resolution_clock::time_point time_start, time_end;
-    time_start = chrono::high_resolution_clock::now();
-   
+    time_start = chrono::high_resolution_clock::now();   
 
     if (multi_thread) {
         NTL::SetNumThreads(min(sqrt_attr_size_glb, num_cores));

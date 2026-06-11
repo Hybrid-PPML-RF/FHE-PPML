@@ -61,6 +61,7 @@ int main(int argc, char* argv[]) {
 		value_size_glb = 8;
 	}
 
+	cout << "Start training with #attr: " << sqrt_attr_size_glb << " #val: " << value_size_glb << endl;
 
 	for (auto &i : seed_glb) {
 		i = random_uint64();
@@ -208,6 +209,8 @@ int main(int argc, char* argv[]) {
 	vector<vector<vector<Ciphertext>>> partitions_for_node;
 	vector<vector<vector<vector<Ciphertext>>>> partition_labels_for_node;
 
+	long www = 0;
+
 	time_start = chrono::high_resolution_clock::now();
 	for (int d = 0; d < depth_glb; d++) { // for each level in the tree, except the root
 		const long long total = 1LL << d;  // integer bit shift, exact and fast
@@ -235,10 +238,14 @@ int main(int argc, char* argv[]) {
 
 					vector<vector<Ciphertext>> random_preprocessed_partitions;
 					vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
+					if (nd == 0) sss = chrono::high_resolution_clock::now();
 					simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels,
 															random_preprocessed_partitions, random_reprocessed_partitioned_labels,
 															seal_context, evaluator, gal_keys_rot, !multi_thread, dataset == 4);
-
+					if (nd == 0) {
+						eee = chrono::high_resolution_clock::now();
+						www += chrono::duration_cast<chrono::microseconds>(eee - sss).count();
+					}
 					perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
 												partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
 												relin_keys, gal_keys_rot, !multi_thread);
@@ -257,9 +264,12 @@ int main(int argc, char* argv[]) {
 
 				vector<vector<Ciphertext>> random_preprocessed_partitions;
 				vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
+				sss = chrono::high_resolution_clock::now();
 				simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels,
 													   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
 													   seal_context, evaluator, gal_keys_rot, !multi_thread, dataset == 4);
+				eee = chrono::high_resolution_clock::now();
+				www += chrono::duration_cast<chrono::microseconds>(eee - sss).count();
 
 				perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
 										partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
@@ -273,6 +283,8 @@ int main(int argc, char* argv[]) {
 		}
 
 	}
+
+	cout << "WHAT GOING ON>>>>>>>>>>> " << www << endl;
 
 	// simulate the labeling for leaf nodes for multi-threading...
 	cout << "Calculating the labeling for leaf nodes...\n";
