@@ -1,3 +1,0 @@
-/home/ubuntu/bfv-FHE-PPML/build/CMakeFiles/ppml.dir
-/home/ubuntu/bfv-FHE-PPML/build/CMakeFiles/edit_cache.dir
-/home/ubuntu/bfv-FHE-PPML/build/CMakeFiles/rebuild_cache.dir
