@@ -397,9 +397,6 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
                                 Ciphertext& selection_vector, Evaluator& evaluator, RelinKeys& relin_keys, GaloisKeys& gal_keys,
                                 bool multi_thread = false) {
 
-    cout << preprocessed_partitions.size() << " " << preprocessed_partitions[0].size() << endl;
-    cout << preprocessed_partitioned_labels.size() << " " << preprocessed_partitioned_labels[0].size() << " " << preprocessed_partitioned_labels[0][0].size() << endl;
-    
     partitions_for_node.resize((int) preprocessed_partitions.size());
     for (int cnt = 0; cnt < (int) preprocessed_partitions.size(); cnt++) {
         partitions_for_node[cnt].resize((int) preprocessed_partitions[cnt].size());
@@ -409,8 +406,6 @@ void perform_partition_for_node(vector<vector<Ciphertext>>& preprocessed_partiti
         partition_labels_for_node[cnt].resize(label_size_glb, vector<Ciphertext>((int) preprocessed_partitioned_labels[0][0].size()));
     }
 
-
-    cout << "HHHHHHHHHHHH" << endl;
     // multi_thread = false;
 
     if (multi_thread) {
@@ -699,11 +694,7 @@ void simulate_random_select_sqrt_attributes(vector<vector<Ciphertext>>& preproce
                                             bool multi_thread = false, bool is_digits = false) {
     int packed = 2 * (floor((double)(poly_modulus_degree_glb/2) / (double) (data_size_glb*value_size_glb)));
     int num_ct = is_digits ? 8 : ceil((double) (sqrt_attr_size_glb) / (double) packed );
-    cout << "   repack number of ct: " << num_ct << endl;
     
-    // direct simulation for digits...
-    // int num_ct = 8;
-
 
     random_preprocessed_partitions.resize(num_ct);
     random_preprocessed_partitioned_labels.resize(num_ct);

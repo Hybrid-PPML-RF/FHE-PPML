@@ -284,8 +284,6 @@ int main(int argc, char* argv[]) {
 
 	}
 
-	cout << "WHAT GOING ON>>>>>>>>>>> " << www << endl;
-
 	// simulate the labeling for leaf nodes for multi-threading...
 	cout << "Calculating the labeling for leaf nodes...\n";
 	const long long power_term = 1LL << (depth_glb - 1);  // integer bit shift, no pow()
