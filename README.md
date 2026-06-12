@@ -92,6 +92,7 @@ Training + labeling + packing total runtime: 37384826 us.
 
 
 ## To Run MPC
+(For a more detailed instruction, see a separate README under mpc folder)
 ```
 echo "MOD = -DGFP_MOD_SZ=5" >> CONFIG.mine
 ```
