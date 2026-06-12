@@ -1,18 +1,6 @@
-# Private Random Forest Training via FHE and MPC
+# Secure Private Random Forest Training via FHE and MPC
 
 This README provides step by step instructions to reproduce our main results.
-
-
-### Absrtact
-
-Random forests are among the most widely used machine learning methods, offering strong predictive performance and natural parallelism--properties which make them particularly attractive in collaborative environments. However, existing privacy-preserving solutions for training random forests remain inefficient.
-
-We propose a new protocol that combines threshold fully homomorphic encryption (tFHE) with secure multi-party computation (MPC) to enable efficient random forest training in a multi-server setting.
-We apply the authentication used in the malicious-secure MPC protocol to the partial decryption procedure of tFHE to resolve the intractable integrity issue of FHE, which typically involves impractical zero-knowledge proofs.
-To further improve efficiency, we apply attribute mapping to reduce the space of potential splitting criteria for a decision tree, while maintaining comparable accuracy.
-Combining these tools, we propose an efficient training protocol for random forests, achieving security against a fully malicious adversary under the honest-majority assumption.
-
-We implement and evaluate our protocol on real-world datasets of various sizes. Our protocol outperforms both FHE-based and MPC-based solutions by one to two orders of magnitude for datasets of moderate sizes.
 
 
 ## Dependencies
@@ -26,7 +14,7 @@ We implement and evaluate our protocol on real-world datasets of various sizes. 
 - (Optional) [HEXL](https://github.com/intel/hexl) library 1.2.3 (this would accelerate the SEAL operations with an Intel AVX-512 processor)
 
 ### Scripts to install the dependencies and build the binary
-Notice that the following instructions are based on installation steps on a AWS c5.12xlarge.
+Notice that the following instructions are based on installation steps on a AWS c6i.32xlarge.
 ```
 # If permission required, please add sudo before the commands as needed
 
@@ -37,6 +25,7 @@ sudo apt-get install libgmp3-dev
 sudo apt-get install libntl-dev # specify version to be 11.4.3-1build1 if not found
 sudo apt install gitc
 sudo apt-get install unzip
+sudo apt-get install clang git libboost-dev libboost-filesystem-dev libboost-iostreams-dev libboost-thread-dev libsodium-dev libssl-dev libtool python3
 
 # With the ppml.zip, put it under ~/PPML and unzip it into FHE-PPML dir
 
@@ -99,3 +88,63 @@ Calculating the labeling for leaf nodes...
 Simulate the packing and extraction...
 Training + labeling + packing total runtime: 37384826 us.
 ```
+
+
+
+## To Run MPC
+```
+echo "MOD = -DGFP_MOD_SZ=5" >> CONFIG.mine
+```
+- setup MP-SPDZ and SSL connections for 10 parties
+- on every party machine:
+  Programs/Source/bench_fhe.py
+  Programs/Source/random_matrix.py
+  Compiler/SC_fun.py
+  ip_parties.txt   (in the MP-SPDZ root)
+
+```
+make setup
+./Scripts/setup-ssl.sh 10
+bash compile_bench.sh
+bash run_bench.sh
+```
+- project built at /home/ubuntu/PPML-MP-SPDZ (commit: <your git hash>)
+
+
+Logs per party in logs/party<i>-bench_fhe-<params>-<timestamp>.log
+Look for "Time" lines in party0's log for wall-clock timings.
+
+
+
+### Simulating the WAN setting:
+We recomment having access to 10 different machines to simulate the communication in a WAN setting. We assume the servers are called `party0, party1, ..., party9` and that we have `ssh` access to them.
+   It is also assumed that the SSH login is possible without password. This
+   can be achieved using password-less SSH keys. See [this
+   tutorial](https://www.digitalocean.com/community/tutorials/how-to-configure-ssh-key-based-authentication-on-a-linux-server)
+   for more information.
+If the benchmarks are run locally skip to 'Local Simulation'
+
+### Running bench_fhe
+
+1.  Edit  `CONFIG.mine` to run for larger fields:
+```
+echo "MOD = -DGFP_MOD_SZ=5" >> CONFIG.mine
+```
+
+2. Execute the following for the underlying setup and sharing mechanism:
+
+```
+make setup
+./Scripts/setup-ssl.sh 10
+make -j8 sy-shamir-party.x
+./compile-parties.sh
+./launch-parties.sh
+```
+Setup-ssl will create the necessary keys for each party. 
+The easiest way for benchmarks in multiple machines is to copy all Pi.pem, Pi.key to all machines.
+
+Compile the program to obtain the executable for each party:
+   ```
+   ./compile-parties-comp.sh
+   ./launch-parties-comp.sh
+   ```
