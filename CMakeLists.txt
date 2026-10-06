@@ -48,3 +48,9 @@ target_link_libraries(ppml SEAL::seal ntl m gmp)
 
 add_executable( test_obl test_oblivious_update_sel.cpp )
 target_link_libraries(test_obl SEAL::seal ntl m gmp)
+
+add_executable( test_rs test_ring_switch.cpp )
+target_link_libraries(test_rs SEAL::seal ntl m gmp)
+
+add_executable( test_orsw test_oblivious_rs.cpp )
+target_link_libraries(test_orsw SEAL::seal ntl m gmp)

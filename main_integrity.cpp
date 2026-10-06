@@ -78,34 +78,72 @@ int main(int argc, char* argv[]) {
 	bgv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
 
 	// For the oblivious selection-vector update (iris only, see util.h) the chain is
-	//     [ 1 base prime ]  +  [ oblivious_levels primes ]  +  [ special prime ]      (all 46 bits)
+	//     [ 1 base prime ]  +  [ oblivious_levels primes ]  +  [ special prime ]
 	// Every level of the chain is consumed by exactly one ciphertext-ciphertext multiplication (followed by one mod switch):
-	//     16  squarings of the equality test x^(p-1)            (ObliviousRotation, p-1 = 2^16)
+	//     eq_levels  equality test of ObliviousRotation: 5 with the polynomial test (default), 16 squarings with Qelect's x^(p-1)
 	//   +  3  selector x P, mask of block 0, selection_vector x threshold_data      (first update)
 	//   + (depth-2)  one more selection_vector x threshold_data for each further tree level
 	//   +  2  deepest level: partitions x selection_vector, and the leaf labeling below, which first mod-switches the selection
 	//         vector one level down and then multiplies (i.e. that multiplication is done on the last-but-one level)
-	// 46 bits is the smallest prime size for which the noise of the repeated squarings stays at its floor (44 bits diverges at
-	// N = 16384, p = 65537).  The base prime only has to hold the noise left at the very end. Tuned with test_oblivious_update_sel.cpp:
-	// the deepest selection vector ends with ~15 bits of noise budget (decryption threshold is 0).
-	// NOTE: ~1200 bits is far above the 438 bits that N = 16384 allows for 128-bit security (SEAL is run with sec_level_type::none,
-	// as before). The 16 squarings alone cost ~740 bits.
-	const bool oblivious_update = (dataset == 1);
-	int fermat_squarings = 0;
-	while ((1 << fermat_squarings) < p - 1) fermat_squarings++;
-	const int levels_first_update = fermat_squarings + 3;
-	const int oblivious_levels = oblivious_update ? (levels_first_update + max(depth_glb - 2, 0) + 2) : 0;
+	// With ring switching (default) the equality test does not count for the ring of the data ciphertexts, see below.
+	// Prime size (N = 16384, p = 65537, test_oblivious_update_sel.cpp, depth-6 tree walk, single ring):
+	//   polynomial test: any size from 40 to 50 bits works (the chain is short, noise cannot run away)
+	//   Fermat test:     44 bits diverges, 46 bits is marginal (5 of 31 nodes lost all their budget), 48 and 50 bits work -> 50 bits
+	// optional 7th argument: 0 = keep the original plaintext split + original modulus chain on iris too (for runtime comparison)
+	const bool oblivious_update = (dataset == 1) && !(argc > 7 && std::stoi(argv[7]) == 0);
+	// optional 8th argument: switch the preprocessed partitions down, once per tree level, to the level of that level's selection
+	// vectors before they are used (default: on for the oblivious update, whose modulus chain is longer than the selection
+	// vectors need at the deeper levels; off for the original path so that it stays a faithful baseline)
+	const bool level_switch = argc > 8 ? (std::stoi(argv[8]) != 0) : oblivious_update;
+	// optional 9th argument: 0 = Qelect's x^(p-1) equality test, 1 (default) = low-depth polynomial equality test
+	const bool equality_poly = !(argc > 9 && std::stoi(argv[9]) == 0);
+	// optional 10th argument: 1 (default) = ring switching: the split ciphertexts and the equality test live in a second context with
+	// ring dimension 2N (secure for the 5 extra levels of the test), the selector is then switched to the ring of the data (N), whose
+	// modulus stays within the 128-bit security bound.  0 = everything in one ring (the chain is then longer than the bound).
+	const bool use_rs = oblivious_update && equality_poly && !(argc > 10 && std::stoi(argv[10]) == 0);
+	const int eq_levels = oblivious_equality_levels(equality_poly, attr_size_glb, value_size_glb, p);
+	const int eq_levels_small = use_rs ? 0 : eq_levels;     // levels of the equality test that are taken from the chain of the data ring
+	const int oblivious_levels = oblivious_update ? (eq_levels_small + 3 + max(depth_glb - 2, 0) + 2) : 0;
 
-	vector<int> modulus_bits;
-	if (oblivious_update) {
-		modulus_bits.push_back(46);
-		for (int i = 0; i < oblivious_levels; i++) modulus_bits.push_back(46);
-		modulus_bits.push_back(46);
+	vector<Modulus> coeff_modulus, coeff_modulus_big;
+	const int small_prime_bits = 40, small_special_bits = 38, big_extra_bits = 40, big_special_bits = 50;
+	if (use_rs) {
+		// primes: [oblivious_levels + 1 shared] [eq_levels extra, only in the big ring] [special big] [special small]; all are
+		// = 1 mod 2 * N_big and therefore valid in both rings.  The data chain is the shared primes + its own special prime,
+		// the big chain is the shared primes + the extra ones + its own special prime.
+		vector<int> bits(oblivious_levels + 1, small_prime_bits);
+		for (int i = 0; i < eq_levels; i++) bits.push_back(big_extra_bits);
+		bits.push_back(big_special_bits);
+		bits.push_back(small_special_bits);
+		auto primes = CoeffModulus::Create(2 * poly_modulus_degree_glb, bits);
+		coeff_modulus.assign(primes.begin(), primes.begin() + oblivious_levels + 1);
+		coeff_modulus_big.assign(primes.begin(), primes.begin() + oblivious_levels + 1 + eq_levels);
+		coeff_modulus_big.push_back(primes[oblivious_levels + 1 + eq_levels]);
+		coeff_modulus.push_back(primes[oblivious_levels + 2 + eq_levels]);
 	} else {
-		// original chain (plaintext partition criterion)
-		modulus_bits.assign(depth_glb < 6 ? 8 : 9, 34);
+		vector<int> modulus_bits;
+		if (oblivious_update) {
+			const int prime_bits = equality_poly ? 40 : 50, special_bits = equality_poly ? 50 : 60;
+			for (int i = 0; i <= oblivious_levels; i++) modulus_bits.push_back(prime_bits);   // base prime + one prime per level
+			modulus_bits.push_back(special_bits);
+		} else {
+			// original chain (plaintext partition criterion)
+			modulus_bits.assign(depth_glb < 6 ? 8 : 9, 34);
+		}
+		coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, modulus_bits);
 	}
-	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, modulus_bits);
+	{
+		int total = 0;
+		for (auto& m : coeff_modulus) total += m.bit_count();
+		cout << "Modulus chain of the data ring (N=" << poly_modulus_degree_glb << "): " << coeff_modulus.size() - 1 << " primes + special = " << total
+			 << " bits (128-bit security bound: " << CoeffModulus::MaxBitCount(poly_modulus_degree_glb) << ")\n";
+		if (use_rs) {
+			int totalb = 0;
+			for (auto& m : coeff_modulus_big) totalb += m.bit_count();
+			cout << "Modulus chain of the ring of the equality test (N=" << 2 * poly_modulus_degree_glb << "): " << coeff_modulus_big.size() - 1
+				 << " primes + special = " << totalb << " bits (bound: " << CoeffModulus::MaxBitCount(2 * poly_modulus_degree_glb) << ")\n";
+		}
+	}
 
 	bgv_params.set_coeff_modulus(coeff_modulus);
 	bgv_params.set_plain_modulus(p);
@@ -122,7 +160,14 @@ int main(int argc, char* argv[]) {
 	SEALContext seal_context(bgv_params, true, sec_level_type::none);
 	primitive_root = seal_context.first_context_data()->plain_ntt_tables()->get_root();
 
-	KeyGenerator keygen(seal_context);
+	// with ring switching the secret key of the data ring is needed in coefficient form (the key-switching key targets embed(sk_small))
+	vector<int> sk_small_coeffs;
+	SecretKey sk_small_custom;
+	if (use_rs) {
+		sk_small_coeffs = rsw::sample_ternary(poly_modulus_degree_glb, 0);   // 0 = OS entropy
+		sk_small_custom = rsw::make_secret_key(sk_small_coeffs, seal_context);
+	}
+	KeyGenerator keygen = use_rs ? KeyGenerator(seal_context, sk_small_custom) : KeyGenerator(seal_context);
 	SecretKey bgv_secret_key = keygen.secret_key();
 
 	PublicKey bgv_public_key;
@@ -135,6 +180,32 @@ int main(int argc, char* argv[]) {
 	Evaluator evaluator(seal_context);
 	BatchEncoder batch_encoder(seal_context);
 	Decryptor decryptor(seal_context, bgv_secret_key);
+
+	// second ring (ring switching): context, independent secret key, relinearization key, key-switching key sk_big -> embed(sk_small)
+	unique_ptr<SEALContext> seal_context_big;
+	unique_ptr<Evaluator> evaluator_big;
+	unique_ptr<Encryptor> encryptor_big;
+	RelinKeys relin_keys_big;
+	rsw::KSwitchKey ksk_big_to_small;
+	if (use_rs) {
+		EncryptionParameters params_big(scheme_type::bgv);
+		params_big.set_poly_modulus_degree(2 * poly_modulus_degree_glb);
+		params_big.set_coeff_modulus(coeff_modulus_big);
+		params_big.set_plain_modulus(p);
+		seal_context_big.reset(new SEALContext(params_big, true, sec_level_type::none));
+		auto sk_big_coeffs = rsw::sample_ternary(2 * poly_modulus_degree_glb, 0);
+		SecretKey sk_big = rsw::make_secret_key(sk_big_coeffs, *seal_context_big);
+		KeyGenerator keygen_big(*seal_context_big, sk_big);
+		PublicKey pk_big;
+		keygen_big.create_public_key(pk_big);
+		keygen_big.create_relin_keys(relin_keys_big);
+		encryptor_big.reset(new Encryptor(*seal_context_big, pk_big));
+		evaluator_big.reset(new Evaluator(*seal_context_big));
+		// the key-switching key is generated for the level of the shared primes (= the top level of the data ring)
+		parms_id_type shared_level = seal_context_big->first_context_data()->parms_id();
+		for (int i = 0; i < eq_levels; i++) shared_level = seal_context_big->get_context_data(shared_level)->next_context_data()->parms_id();
+		ksk_big_to_small = rsw::gen_key_switch_key(sk_big_coeffs, rsw::embed_sk(sk_small_coeffs), *seal_context_big, shared_level, p, 8, 0);
+	}
 
 	// (the separate +-2^i key set that used to be generated here was never used; the oblivious expansion needs the negative
 	//  powers of two, which are now part of steps_rot)
@@ -191,8 +262,8 @@ int main(int argc, char* argv[]) {
 
 
 	if (oblivious_update) {
-		// expansion of r, the n-slot selector, fold/tile over the A*V blocks of P (all in util.h)
-		for (int s : oblivious_update_rotation_steps(data_size_glb, attr_size_glb, value_size_glb)) {
+		// fold/tile over the A*V blocks of P, copying P into the regions of the ciphertext, aligning regions (all in util.h)
+		for (int s : oblivious_update_rotation_steps(data_size_glb, attr_size_glb, value_size_glb, true)) {
 			steps_rot.push_back(s);
 		}
 	}
@@ -223,11 +294,11 @@ int main(int argc, char* argv[]) {
 		plain_x = obl_decode_dataset(inputs_X[0], decryptor, batch_encoder);
 	}
 
-	// The oblivious update multiplies the selector (which sits `fermat_squarings` levels below the top after the equality test)
+	// The oblivious update multiplies the selector (which sits `eq_levels_small` levels below the top after the equality test)
 	// with P, which is built from the partitions of X. So the clients' ciphertexts only need that many levels: switch them down once
 	// (this is what a client could do before uploading), which makes preprocessing and all later operations on them cheaper.
 	if (oblivious_update) {
-		int data_chain = (int) seal_context.first_context_data()->chain_index() - fermat_squarings;
+		int data_chain = (int) seal_context.first_context_data()->chain_index() - eq_levels_small;
 		for (auto& ct : inputs_X) {
 			while ((int) seal_context.get_context_data(ct.parms_id())->chain_index() > data_chain) evaluator.mod_switch_to_next_inplace(ct);
 		}
@@ -254,38 +325,63 @@ int main(int argc, char* argv[]) {
 
 	// Oblivious update only: cached constants and P (the "x < theta" partitions of all attributes/thresholds packed in ONE ciphertext)
 	ObliviousSelCtx oblivious_ctx;
-	// the splits that the MPC would output for each internal node, as *fresh* ciphertexts (a, 0, ..., 0) and (theta, 0, ..., 0);
-	// the server never sees them in the clear.  Here they are random (the plaintext values are only kept for verification).
+	ObliviousRingSwitch oblivious_rs;    // ring switching only
+	// The splits that the MPC would output for each internal node, as *fresh* ciphertexts; the server never sees them in the clear.
+	// The nodes of a level are handled in groups of G = oblivious_ctx.group_size nodes per ciphertext (util.h): one ciphertext holds
+	// the attribute index of the G nodes of a group (replicated over the region of each node, as the parties can do with their
+	// shares), another one the thresholds. Here the splits are random (the plaintext values are only kept for verification).
 	const int num_internal = (1 << (depth_glb - 1)) - 1;
-	vector<Ciphertext> split_attr_ct(num_internal), split_val_ct(num_internal);
+	vector<vector<Ciphertext>> level_attr_ct(depth_glb), level_val_ct(depth_glb);   // [level][group]
 	vector<int> split_attr_pt(num_internal), split_val_pt(num_internal);
 
 	if (oblivious_update) {
 		time_start = chrono::high_resolution_clock::now();
+		oblivious_ctx.equality_poly = equality_poly;
 		build_oblivious_sel_ctx(oblivious_ctx, preprocessed_partitions, seal_context, evaluator, batch_encoder, gal_keys_rot);
+		if (use_rs) oblivious_ring_switch_init(oblivious_rs, *seal_context_big, *evaluator_big, relin_keys_big, ksk_big_to_small, oblivious_ctx);
 		time_end = chrono::high_resolution_clock::now();
-		cout << "Packing P time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
+		cout << "Packing P time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us. "
+			 << oblivious_ctx.group_size << " nodes per ciphertext.\n";
 
 		// root: every datapoint is selected (S_0 = 1_N); only the levels below it are computed obliviously
 		vector<uint64_t> root_vec(poly_modulus_degree_glb, 1);
 		Plaintext root_pl;
 		batch_encoder.encode(root_vec, root_pl);
 		encryptor.encrypt(root_pl, selection_vector[0]);
-		evaluator.mod_switch_to_inplace(selection_vector[0], inputs_X[0].parms_id());
+		// The first update matches the root to the threshold data, which sits at chain index top - eq_levels_small - 2 (equality test, selector x P,
+		// fold + mask). The root is only ever used at that level or below, so switch it there right away: level 0 then runs on as many
+		// limbs as the original chain has, instead of on the (longer) level of the clients' inputs.
+		int root_chain = (int) seal_context.first_context_data()->chain_index() - eq_levels_small - 2;
+		while ((int) seal_context.get_context_data(selection_vector[0].parms_id())->chain_index() > root_chain)
+			evaluator.mod_switch_to_next_inplace(selection_vector[0]);
 
 		mt19937 split_rng(2024);
-		for (int i = 0; i < num_internal; i++) {
-			// theta in [1, V-1]: split is "x < theta" / "x >= theta" (theta = 0 would be an empty left child)
-			split_attr_pt[i] = split_rng() % attr_size_glb;
-			split_val_pt[i] = 1 + split_rng() % (value_size_glb - 1);
-			vector<uint64_t> va(poly_modulus_degree_glb, 0), vv(poly_modulus_degree_glb, 0);
-			va[0] = split_attr_pt[i];
-			vv[0] = split_val_pt[i];
-			Plaintext pa, pv;
-			batch_encoder.encode(va, pa);
-			batch_encoder.encode(vv, pv);
-			encryptor.encrypt(pa, split_attr_ct[i]);
-			encryptor.encrypt(pv, split_val_ct[i]);
+		for (int d = 0; d < depth_glb - 1; d++) {
+			int groups = ((1 << d) + oblivious_ctx.group_size - 1) / oblivious_ctx.group_size;
+			level_attr_ct[d].resize(groups);
+			level_val_ct[d].resize(groups);
+			for (int gi = 0; gi < groups; gi++) {
+				vector<int> attrs, vals;
+				for (int g = 0; g < oblivious_ctx.group_size && gi * oblivious_ctx.group_size + g < (1 << d); g++) {
+					// theta in [1, V-1]: split is "x < theta" / "x >= theta" (theta = 0 would be an empty left child)
+					int node = (1 << d) - 1 + gi * oblivious_ctx.group_size + g;
+					split_attr_pt[node] = split_rng() % attr_size_glb;
+					split_val_pt[node] = 1 + split_rng() % (value_size_glb - 1);
+					attrs.push_back(split_attr_pt[node]);
+					vals.push_back(split_val_pt[node]);
+				}
+				if (use_rs) {
+					// the parties encrypt their (replicated, embedded) shares under the key of the big ring
+					level_attr_ct[d][gi] = oblivious_encrypt_group_big(oblivious_ctx, attrs, batch_encoder, *encryptor_big, 2 * poly_modulus_degree_glb, true);
+					level_val_ct[d][gi] = oblivious_encrypt_group_big(oblivious_ctx, vals, batch_encoder, *encryptor_big, 2 * poly_modulus_degree_glb, true);
+				} else {
+					Plaintext pa, pv;
+					batch_encoder.encode(oblivious_group_vector(oblivious_ctx, attrs, true), pa);
+					batch_encoder.encode(oblivious_group_vector(oblivious_ctx, vals, true), pv);
+					encryptor.encrypt(pa, level_attr_ct[d][gi]);
+					encryptor.encrypt(pv, level_val_ct[d][gi]);
+				}
+			}
 		}
 	} else {
 		// just fill in random selection vectors...
@@ -298,6 +394,8 @@ int main(int argc, char* argv[]) {
 	int threshold_attr_ind = 1, threshold_val_ind = 1;
 
 	vector<vector<vector<Ciphertext>>> partitions_for_node;
+	vector<vector<Ciphertext>> level_partitions;                            // copies of the preprocessed partitions at the current level
+	vector<vector<vector<Ciphertext>>> level_partitioned_labels;
 	vector<vector<vector<vector<Ciphertext>>>> partition_labels_for_node;
 
 	long www = 0;
@@ -308,6 +406,50 @@ int main(int argc, char* argv[]) {
 		bool multi_thread = pow(2,d) >= 4;
 
 		cout << "	Training for level " << d << " with " << pow(2,d) << " nodes...\n";
+		chrono::high_resolution_clock::time_point lvl_start = chrono::high_resolution_clock::now(), lvl_mid;
+
+		// oblivious update: the equality test + extraction of the threshold data for all nodes of this level, one ciphertext per
+		// group of nodes (independent groups run in parallel)
+		vector<Ciphertext> level_threshold_data;
+		if (oblivious_update && d != depth_glb - 1) {
+			int groups = (int) level_attr_ct[d].size();
+			level_threshold_data.resize(groups);
+			auto compute_group = [&](int gi) {
+				if (use_rs) {
+					level_threshold_data[gi] = oblivious_group_threshold_data_rs(seal_context, evaluator, oblivious_ctx, relin_keys, gal_keys_rot,
+																				 oblivious_rs, level_attr_ct[d][gi], level_val_ct[d][gi]);
+				} else {
+					level_threshold_data[gi] = oblivious_group_threshold_data(seal_context, evaluator, oblivious_ctx, relin_keys, gal_keys_rot,
+																			  level_attr_ct[d][gi], level_val_ct[d][gi], true);
+				}
+			};
+			if (groups > 1) {
+				NTL::SetNumThreads(min(groups, num_cores));
+				NTL_EXEC_RANGE(groups, first, last);
+				for (int gi = first; gi < last; gi++) compute_group(gi);
+				NTL_EXEC_RANGE_END;
+			} else {
+				compute_group(0);
+			}
+		}
+
+		lvl_mid = chrono::high_resolution_clock::now();
+
+		// Every operation on the partitions below happens at the level of the selection vector anyway (the higher of the two
+		// ciphertexts is switched down), but the rotations of simulate_random_select_sqrt_attributes would run at the much higher
+		// level of the stored partitions, and each node would switch its own copies. Switch once per level instead.
+		if (level_switch) {
+			level_partitions = preprocessed_partitions;
+			level_partitioned_labels = preprocessed_partitioned_labels;
+			parms_id_type target = selection_vector[(1 << d) - 1].parms_id();
+			int target_chain = (int) seal_context.get_context_data(target)->chain_index();
+			for (auto& v : level_partitions) for (auto& ct : v)
+				if ((int) seal_context.get_context_data(ct.parms_id())->chain_index() > target_chain) evaluator.mod_switch_to_inplace(ct, target);
+			for (auto& v : level_partitioned_labels) for (auto& w : v) for (auto& ct : w)
+				if ((int) seal_context.get_context_data(ct.parms_id())->chain_index() > target_chain) evaluator.mod_switch_to_inplace(ct, target);
+		}
+		vector<vector<Ciphertext>>& part_for_level = level_switch ? level_partitions : preprocessed_partitions;
+		vector<vector<vector<Ciphertext>>>& part_labels_for_level = level_switch ? level_partitioned_labels : preprocessed_partitioned_labels;
 
 		partitions_for_node.resize(pow(2,d));
 		partition_labels_for_node.resize(pow(2,d));
@@ -330,7 +472,7 @@ int main(int argc, char* argv[]) {
 					vector<vector<Ciphertext>> random_preprocessed_partitions;
 					vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
 					if (nd == 0) sss = chrono::high_resolution_clock::now();
-					simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels,
+					simulate_random_select_sqrt_attributes(part_for_level, part_labels_for_level,
 															random_preprocessed_partitions, random_reprocessed_partitioned_labels,
 															seal_context, evaluator, gal_keys_rot, !multi_thread, dataset == 4);
 					if (nd == 0) {
@@ -343,8 +485,8 @@ int main(int argc, char* argv[]) {
 
 					if (d != depth_glb-1) {
 						if (oblivious_update) {
-							oblivious_update_selection_vector(selection_vector, oblivious_ctx, split_attr_ct[sel_ind], split_val_ct[sel_ind], d, nd,
-																			seal_context, evaluator, relin_keys, gal_keys_rot);
+							oblivious_apply_threshold_data(selection_vector, level_threshold_data[nd / oblivious_ctx.group_size], nd % oblivious_ctx.group_size,
+													  d, nd, oblivious_ctx, seal_context, evaluator, relin_keys, gal_keys_rot);
 						} else {
 							update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
 																		seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
@@ -361,7 +503,7 @@ int main(int argc, char* argv[]) {
 				vector<vector<Ciphertext>> random_preprocessed_partitions;
 				vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
 				sss = chrono::high_resolution_clock::now();
-				simulate_random_select_sqrt_attributes(preprocessed_partitions, preprocessed_partitioned_labels,
+				simulate_random_select_sqrt_attributes(part_for_level, part_labels_for_level,
 													   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
 													   seal_context, evaluator, gal_keys_rot, !multi_thread, dataset == 4);
 				eee = chrono::high_resolution_clock::now();
@@ -373,8 +515,8 @@ int main(int argc, char* argv[]) {
 
 				if (d != depth_glb-1) {
 					if (oblivious_update) {
-						oblivious_update_selection_vector(selection_vector, oblivious_ctx, split_attr_ct[sel_ind], split_val_ct[sel_ind], d, nd,
-																		seal_context, evaluator, relin_keys, gal_keys_rot);
+						oblivious_apply_threshold_data(selection_vector, level_threshold_data[nd / oblivious_ctx.group_size], nd % oblivious_ctx.group_size,
+													  d, nd, oblivious_ctx, seal_context, evaluator, relin_keys, gal_keys_rot);
 					} else {
 						update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
 																	seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
@@ -383,6 +525,9 @@ int main(int argc, char* argv[]) {
 			}
 		}
 
+		chrono::high_resolution_clock::time_point lvl_end = chrono::high_resolution_clock::now();
+		cout << "		level " << d << ": oblivious group computation " << chrono::duration_cast<chrono::milliseconds>(lvl_mid - lvl_start).count()
+			 << " ms, nodes (partitions + selection update + attribute re-selection) " << chrono::duration_cast<chrono::milliseconds>(lvl_end - lvl_mid).count() << " ms\n";
 	}
 
 	if (oblivious_update && verify) {
