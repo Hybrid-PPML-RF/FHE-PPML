@@ -7,6 +7,8 @@
 #include <NTL/BasicThreadPool.h>
 #include <NTL/ZZ.h>
 #include <thread>
+#include <set>
+#include <random>
 
 using namespace seal;
 using namespace std;
@@ -26,6 +28,9 @@ int main(int argc, char* argv[]) {
 
 	int dataset = std::stoi(argv[1]);
 	int is_sqrt = std::stoi(argv[4]);
+	// optional 6th argument: ring dimension (default 16384). Only meant for smoke tests on a small machine (e.g. 8192 for iris,
+	// where A*V*n = 3200 still fits in one batching row); the tuned modulus chain was validated for 16384.
+	if (argc > 6) poly_modulus_degree_glb = std::stoi(argv[6]);
 
 	// default as iris
 	if (dataset == 1) {
@@ -72,15 +77,35 @@ int main(int argc, char* argv[]) {
 	EncryptionParameters bgv_params(scheme_type::bgv);
 	bgv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
 
-	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
-														34, 34, 34, 34, 34, 34, 34, 34, 34
-													});
+	// For the oblivious selection-vector update (iris only, see util.h) the chain is
+	//     [ 1 base prime ]  +  [ oblivious_levels primes ]  +  [ special prime ]      (all 46 bits)
+	// Every level of the chain is consumed by exactly one ciphertext-ciphertext multiplication (followed by one mod switch):
+	//     16  squarings of the equality test x^(p-1)            (ObliviousRotation, p-1 = 2^16)
+	//   +  3  selector x P, mask of block 0, selection_vector x threshold_data      (first update)
+	//   + (depth-2)  one more selection_vector x threshold_data for each further tree level
+	//   +  2  deepest level: partitions x selection_vector, and the leaf labeling below, which first mod-switches the selection
+	//         vector one level down and then multiplies (i.e. that multiplication is done on the last-but-one level)
+	// 46 bits is the smallest prime size for which the noise of the repeated squarings stays at its floor (44 bits diverges at
+	// N = 16384, p = 65537).  The base prime only has to hold the noise left at the very end. Tuned with test_oblivious_update_sel.cpp:
+	// the deepest selection vector ends with ~15 bits of noise budget (decryption threshold is 0).
+	// NOTE: ~1200 bits is far above the 438 bits that N = 16384 allows for 128-bit security (SEAL is run with sec_level_type::none,
+	// as before). The 16 squarings alone cost ~740 bits.
+	const bool oblivious_update = (dataset == 1);
+	int fermat_squarings = 0;
+	while ((1 << fermat_squarings) < p - 1) fermat_squarings++;
+	const int levels_first_update = fermat_squarings + 3;
+	const int oblivious_levels = oblivious_update ? (levels_first_update + max(depth_glb - 2, 0) + 2) : 0;
 
-	if (depth_glb < 6) {
-		coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, {
-														34, 34, 34, 34, 34, 34, 34, 34
-													});
+	vector<int> modulus_bits;
+	if (oblivious_update) {
+		modulus_bits.push_back(46);
+		for (int i = 0; i < oblivious_levels; i++) modulus_bits.push_back(46);
+		modulus_bits.push_back(46);
+	} else {
+		// original chain (plaintext partition criterion)
+		modulus_bits.assign(depth_glb < 6 ? 8 : 9, 34);
 	}
+	auto coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, modulus_bits);
 
 	bgv_params.set_coeff_modulus(coeff_modulus);
 	bgv_params.set_plain_modulus(p);
@@ -111,14 +136,9 @@ int main(int argc, char* argv[]) {
 	BatchEncoder batch_encoder(seal_context);
 	Decryptor decryptor(seal_context, bgv_secret_key);
 
-	GaloisKeys gal_keys, gal_keys_rot;
-
-	vector<int> stepsfirst = {0, 1};
-	for (int i = 0; i < log2(poly_modulus_degree_glb/2); i++) {
-		stepsfirst.push_back(-(1<<i));
-		stepsfirst.push_back((1<<i));
-	}
-	keygen.create_galois_keys(stepsfirst, gal_keys);
+	// (the separate +-2^i key set that used to be generated here was never used; the oblivious expansion needs the negative
+	//  powers of two, which are now part of steps_rot)
+	GaloisKeys gal_keys_rot;
 
 	// for preparing all threshold values, rotation and addition
 	vector<int> steps_rot = {0, 1};
@@ -159,13 +179,27 @@ int main(int argc, char* argv[]) {
 			int step = l * data_size_glb % (poly_modulus_degree_glb / 2);
 			if (step > 0) steps_rot.push_back(step);
 		}
-		for (int i = 0; i < poly_modulus_degree_glb / data_size_glb; i++) {
-			int step = i * data_size_glb % (poly_modulus_degree_glb / 2);
-			if (step > 0) steps_rot.push_back(step);
+		// all multiples of data_size: none of the rotations below needs them for iris, and every extra Galois key is huge now that
+		// the modulus chain has ~25 primes, so they are only generated for the original (non-oblivious) configurations
+		if (!oblivious_update) {
+			for (int i = 0; i < poly_modulus_degree_glb / data_size_glb; i++) {
+				int step = i * data_size_glb % (poly_modulus_degree_glb / 2);
+				if (step > 0) steps_rot.push_back(step);
+			}
 		}
 	}
 
 
+	if (oblivious_update) {
+		// expansion of r, the n-slot selector, fold/tile over the A*V blocks of P (all in util.h)
+		for (int s : oblivious_update_rotation_steps(data_size_glb, attr_size_glb, value_size_glb)) {
+			steps_rot.push_back(s);
+		}
+	}
+
+	// remove duplicates: every Galois key is large (it grows quadratically with the length of the modulus chain)
+	set<int> steps_unique(steps_rot.begin(), steps_rot.end());
+	steps_rot.assign(steps_unique.begin(), steps_unique.end());
 	keygen.create_galois_keys(steps_rot, gal_keys_rot);
 
 	Plaintext pl_test, all_ones;
@@ -183,6 +217,26 @@ int main(int argc, char* argv[]) {
 
 	cout << "Initial noise budget: " << decryptor.invariant_noise_budget(inputs_X[0]) << " bits\n";
 
+	const bool verify = argc > 5 && std::stoi(argv[5]);   // optional 5th argument: decrypt and check the selection vectors
+	vector<vector<int>> plain_x;
+	if (oblivious_update && verify) {
+		plain_x = obl_decode_dataset(inputs_X[0], decryptor, batch_encoder);
+	}
+
+	// The oblivious update multiplies the selector (which sits `fermat_squarings` levels below the top after the equality test)
+	// with P, which is built from the partitions of X. So the clients' ciphertexts only need that many levels: switch them down once
+	// (this is what a client could do before uploading), which makes preprocessing and all later operations on them cheaper.
+	if (oblivious_update) {
+		int data_chain = (int) seal_context.first_context_data()->chain_index() - fermat_squarings;
+		for (auto& ct : inputs_X) {
+			while ((int) seal_context.get_context_data(ct.parms_id())->chain_index() > data_chain) evaluator.mod_switch_to_next_inplace(ct);
+		}
+		for (auto& ct : inputs_Y) {
+			while ((int) seal_context.get_context_data(ct.parms_id())->chain_index() > data_chain) evaluator.mod_switch_to_next_inplace(ct);
+		}
+		cout << "Inputs switched to chain index " << data_chain << ", budget " << decryptor.invariant_noise_budget(inputs_X[0]) << " bits\n";
+	}
+
 	chrono::high_resolution_clock::time_point time_start, time_end, sss, eee;
     time_start = chrono::high_resolution_clock::now();
 
@@ -198,12 +252,49 @@ int main(int argc, char* argv[]) {
 	/////////////////////////////////////////// for each node, prepare the gini-index inputs ////////////////////////////////////////////
 	vector<Ciphertext> selection_vector(pow(2, depth_glb));
 
-	// just fill in random selection vectors...
-	for (int i = 0; i < (int) selection_vector.size(); i++) {
-		encryptor.encrypt(pl_test, selection_vector[i]);
+	// Oblivious update only: cached constants and P (the "x < theta" partitions of all attributes/thresholds packed in ONE ciphertext)
+	ObliviousSelCtx oblivious_ctx;
+	// the splits that the MPC would output for each internal node, as *fresh* ciphertexts (a, 0, ..., 0) and (theta, 0, ..., 0);
+	// the server never sees them in the clear.  Here they are random (the plaintext values are only kept for verification).
+	const int num_internal = (1 << (depth_glb - 1)) - 1;
+	vector<Ciphertext> split_attr_ct(num_internal), split_val_ct(num_internal);
+	vector<int> split_attr_pt(num_internal), split_val_pt(num_internal);
+
+	if (oblivious_update) {
+		time_start = chrono::high_resolution_clock::now();
+		build_oblivious_sel_ctx(oblivious_ctx, preprocessed_partitions, seal_context, evaluator, batch_encoder, gal_keys_rot);
+		time_end = chrono::high_resolution_clock::now();
+		cout << "Packing P time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
+
+		// root: every datapoint is selected (S_0 = 1_N); only the levels below it are computed obliviously
+		vector<uint64_t> root_vec(poly_modulus_degree_glb, 1);
+		Plaintext root_pl;
+		batch_encoder.encode(root_vec, root_pl);
+		encryptor.encrypt(root_pl, selection_vector[0]);
+		evaluator.mod_switch_to_inplace(selection_vector[0], inputs_X[0].parms_id());
+
+		mt19937 split_rng(2024);
+		for (int i = 0; i < num_internal; i++) {
+			// theta in [1, V-1]: split is "x < theta" / "x >= theta" (theta = 0 would be an empty left child)
+			split_attr_pt[i] = split_rng() % attr_size_glb;
+			split_val_pt[i] = 1 + split_rng() % (value_size_glb - 1);
+			vector<uint64_t> va(poly_modulus_degree_glb, 0), vv(poly_modulus_degree_glb, 0);
+			va[0] = split_attr_pt[i];
+			vv[0] = split_val_pt[i];
+			Plaintext pa, pv;
+			batch_encoder.encode(va, pa);
+			batch_encoder.encode(vv, pv);
+			encryptor.encrypt(pa, split_attr_ct[i]);
+			encryptor.encrypt(pv, split_val_ct[i]);
+		}
+	} else {
+		// just fill in random selection vectors...
+		for (int i = 0; i < (int) selection_vector.size(); i++) {
+			encryptor.encrypt(pl_test, selection_vector[i]);
+		}
 	}
 
-	// ideally, different nodes should have different partition thresholds, but just for some simulation...
+	// legacy (plaintext split) path only: ideally, different nodes should have different partition thresholds, but just for some simulation...
 	int threshold_attr_ind = 1, threshold_val_ind = 1;
 
 	vector<vector<vector<Ciphertext>>> partitions_for_node;
@@ -251,8 +342,13 @@ int main(int argc, char* argv[]) {
 												relin_keys, gal_keys_rot, !multi_thread);
 
 					if (d != depth_glb-1) {
-						update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
-												seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
+						if (oblivious_update) {
+							oblivious_update_selection_vector(selection_vector, oblivious_ctx, split_attr_ct[sel_ind], split_val_ct[sel_ind], d, nd,
+																			seal_context, evaluator, relin_keys, gal_keys_rot);
+						} else {
+							update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
+																		seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
+						}
 					}
 
 				}
@@ -276,12 +372,23 @@ int main(int argc, char* argv[]) {
 										relin_keys, gal_keys_rot, !multi_thread);
 
 				if (d != depth_glb-1) {
-					update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
-											seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
+					if (oblivious_update) {
+						oblivious_update_selection_vector(selection_vector, oblivious_ctx, split_attr_ct[sel_ind], split_val_ct[sel_ind], d, nd,
+																		seal_context, evaluator, relin_keys, gal_keys_rot);
+					} else {
+						update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
+																	seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
+					}
 				}
 			}
 		}
 
+	}
+
+	if (oblivious_update && verify) {
+		int wrong = verify_oblivious_selection_vectors(selection_vector, split_attr_pt, split_val_pt, plain_x, depth_glb,
+													   decryptor, batch_encoder, seal_context);
+		cout << "Verification of all selection vectors against plaintext training: " << (wrong ? "FAILED, wrong slots: " + to_string(wrong) : string("OK")) << endl;
 	}
 
 	// simulate the labeling for leaf nodes for multi-threading...
@@ -317,9 +424,11 @@ int main(int argc, char* argv[]) {
 				if (tmp.parms_id() != seal_context.last_parms_id()) {
 					evaluator.mod_switch_to_next_inplace(tmp);
 				}
+				if (d == 0 && k == 0 && i == 0) cout << "	budget of the node partitions entering the packing: " << decryptor.invariant_noise_budget(tmp) << endl;
 				evaluator.multiply_plain_inplace(tmp, pll);
 				evaluator.rotate_rows_inplace(tmp, 1, gal_keys_rot);
 				evaluator.add_inplace(tmp, tmp);
+				if (d == 0 && k == 0 && i == 0) cout << "	budget after packing: " << decryptor.invariant_noise_budget(tmp) << endl;
 			}
 		}
 	}

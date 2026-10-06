@@ -1,3 +1,6 @@
+#pragma once
+#include <functional>
+#include <string>
 #include <NTL/BasicThreadPool.h>
 #include <NTL/ZZ.h>
 #include <thread>
@@ -797,3 +800,331 @@ void simulate_random_select_sqrt_attributes(vector<vector<Ciphertext>>& preproce
 
 }
 
+
+
+// =====================================================================================================================
+//  OBLIVIOUS selection-vector update  (UpdateSel of Algorithm 6 in the paper, but the split (iota*, theta*) stays secret)
+// =====================================================================================================================
+//
+//  Data layout (unchanged from the rest of the repo, one ciphertext for iris):
+//      slot  a * V * n  +  v * n  +  j        a = attribute, v = value, j = datapoint,   n = data_size, V = value_size
+//  Preprocessed partitions: preprocessed_partitions[0][2*theta-1] holds, in the first n slots of every attribute chunk
+//  (slot a*V*n + j), the indicator "x_{j,a} < theta"  (all other slots of the chunk are garbage).
+//
+//  Pipeline for ONE tree node (all inputs are ciphertexts, nothing about the split is ever in the clear):
+//
+//    0. (offline, once)  P := packed "left" partitions.  P has the same layout as X: slot a*V*n + theta*n + j equals
+//                        [x_{j,a} < theta]  (zero for theta = 0, and zero outside [0, A*V*n)).  See build_oblivious_sel_ctx.
+//    1. r  = (attr * V + theta) * n                   (slot 0 only; linear in the two fresh input ciphertexts)
+//    2. ObliviousRotation:   (r,0,..,0)  ->  (0,..,0,1,0,..,0)   with the single 1 at slot r      [Qelect, 16 squarings]
+//    3. rotation_and_add:    (0,..,1,..,0) -> selector = n consecutive ones at slots [r, r+n)
+//    4. E = selector * P  (CT x CT)                    -> only block (attr, theta) of P survives
+//    5. fold E over all A*V blocks into block 0, mask block 0, then tile it back over all A*V blocks
+//       => T = the n-bit left-child indicator, repeated (period n) over the whole packed region
+//    6. S_left  = S_parent * T       (CT x CT)
+//       S_right = S_parent - S_left  (children partition the parent, so no second oblivious extraction is needed)
+//
+//  Rows: everything lives in the first batching row (slots [0, N/2)); that is enough for iris (A*V*n = 3200 < 8192).
+// =====================================================================================================================
+
+// Optional debugging hook (e.g. to print the noise budget after each stage).  Empty by default.
+static std::function<void(const std::string&, const Ciphertext&)> oblivious_trace_glb;
+#define OBL_TRACE(name, ct) do { if (oblivious_trace_glb) oblivious_trace_glb(name, ct); } while (0)
+
+// every cached plaintext / ciphertext the oblivious update needs; built once by build_oblivious_sel_ctx
+struct ObliviousSelCtx {
+    Plaintext idx_pl;               // slot j  ->  j                      (the "[0, 1, ..., N-1]" vector of Qelect)
+    Plaintext ones_pl;              // all slots = 1
+    Plaintext first_block_mask_pl;  // slots [0, n) = 1, otherwise 0
+    Ciphertext packed_partitions;   // P, see above
+    int fermat_switch_every = 1;    // mod-switch after every k-th squaring of the x^(p-1) evaluation
+};
+
+inline int obl_norm_step(long long s) {  // keep the sign, make |step| < N/2
+    return (int) (s % (long long) (poly_modulus_degree_glb / 2));
+}
+
+inline int obl_chain_index(const SEALContext& context, const Ciphertext& ct) {
+    return (int) context.get_context_data(ct.parms_id())->chain_index();
+}
+
+// mod-switch whichever of the two ciphertexts is on the higher level down to the level of the other
+inline void obl_match_levels(const SEALContext& context, Evaluator& evaluator, Ciphertext& a, Ciphertext& b) {
+    int ia = obl_chain_index(context, a), ib = obl_chain_index(context, b);
+    if (ia > ib) evaluator.mod_switch_to_inplace(a, b.parms_id());
+    else if (ib > ia) evaluator.mod_switch_to_inplace(b, a.parms_id());
+}
+
+// plaintext that is the constant polynomial c  (== multiplying every slot by c)
+inline Plaintext obl_const_plain(uint64_t c) {
+    Plaintext pl(1);
+    pl[0] = c;
+    return pl;
+}
+
+// sum_{k=0}^{len-1} rotate_rows(ct, sign * k * unit), using O(log len) rotations.
+// sign = +1: slot s gets sum of ct[s], ct[s+unit], ..., ct[s+(len-1)*unit]   (the "forward" window of rotation_and_add)
+// sign = -1: slot s gets sum of ct[s], ct[s-unit], ..., ct[s-(len-1)*unit]   (copies a block "to the right")
+inline vector<int> obl_window_sum_steps(int len, int unit, int sign) {
+    vector<int> steps;
+    if (len <= 1) return steps;
+    int hb = 0;
+    while ((1 << (hb + 1)) <= len) hb++;
+    for (int i = 0; i < hb; i++) steps.push_back(obl_norm_step((long long) sign * (1 << i) * unit));
+    int offs = 0;
+    for (int i = hb; i >= 0; i--) {
+        if ((len >> i) & 1) {
+            if (offs) steps.push_back(obl_norm_step((long long) sign * offs * unit));
+            offs += (1 << i);
+        }
+    }
+    return steps;
+}
+
+inline Ciphertext obl_window_sum(Evaluator& evaluator, const Ciphertext& input, int len, int unit, int sign,
+                                 const GaloisKeys& gal_keys) {
+    if (len <= 1) return input;
+    int hb = 0;
+    while ((1 << (hb + 1)) <= len) hb++;
+
+    // w[i] = window of 2^i shifts
+    vector<Ciphertext> w(hb + 1);
+    w[0] = input;
+    for (int i = 1; i <= hb; i++) {
+        Ciphertext rot;
+        evaluator.rotate_rows(w[i-1], obl_norm_step((long long) sign * (1 << (i-1)) * unit), gal_keys, rot);
+        evaluator.add(w[i-1], rot, w[i]);
+    }
+
+    // the binary expansion of len, from the highest bit down; each piece is shifted by the length already covered
+    Ciphertext result;
+    bool init = false;
+    int offs = 0;
+    for (int i = hb; i >= 0; i--) {
+        if (!((len >> i) & 1)) continue;
+        Ciphertext term = w[i];
+        if (offs) evaluator.rotate_rows_inplace(term, obl_norm_step((long long) sign * offs * unit), gal_keys);
+        if (!init) { result = term; init = true; }
+        else evaluator.add_inplace(result, term);
+        offs += (1 << i);
+    }
+    return result;
+}
+
+// (r, 0, ..., 0)  ->  (r, r, ..., r, 0, ..., 0) with r in all N/2 slots of the first row (13 rotations for N = 16384)
+inline vector<int> obl_expand_steps() {
+    vector<int> steps;
+    for (int i = 0; (1 << i) < (int) (poly_modulus_degree_glb / 2); i++) steps.push_back(-(1 << i));
+    return steps;
+}
+
+inline Ciphertext obl_expand_first_slot_to_row(Evaluator& evaluator, const Ciphertext& input, const GaloisKeys& gal_keys) {
+    Ciphertext out = input, rot;
+    for (int i = 0; (1 << i) < (int) (poly_modulus_degree_glb / 2); i++) {
+        evaluator.rotate_rows(out, -(1 << i), gal_keys, rot);
+        evaluator.add_inplace(out, rot);
+    }
+    return out;
+}
+
+// All Galois steps the oblivious update needs (add them to the GaloisKeys that are passed to the functions below).
+inline vector<int> oblivious_update_rotation_steps(int data_size, int attr_size, int val_size) {
+    vector<int> steps = obl_expand_steps();
+    for (int s : obl_window_sum_steps(data_size, 1, -1)) steps.push_back(s);                      // selector (n ones)
+    for (int s : obl_window_sum_steps(attr_size * val_size, data_size, +1)) steps.push_back(s);   // fold  into block 0
+    for (int s : obl_window_sum_steps(attr_size * val_size, data_size, -1)) steps.push_back(s);   // tile  from block 0
+    steps.push_back(obl_norm_step(-data_size));                                                    // building P
+    return steps;
+}
+
+// ObliviousRotation (Qelect, MPE_docker_version.cpp l.227-235):
+//   input : ct_r encrypting (r, 0, ..., 0),  0 <= r < N/2
+//   output: ct encrypting the unit vector e_r  (1 at slot r, 0 elsewhere, every slot of both rows)
+// Evaluates 1 - (j - r)^(p-1) in every slot j  (Fermat: x^(p-1) = 1 for x != 0 mod p) -- log2(p-1) = 16 squarings for p = 65537.
+inline Ciphertext oblivious_rotation(const SEALContext& context, Evaluator& evaluator, const ObliviousSelCtx& oc,
+                                     const RelinKeys& relin_keys, const GaloisKeys& gal_keys, const Ciphertext& ct_r) {
+    uint64_t t = context.first_context_data()->parms().plain_modulus().value();
+    int num_sq = 0;
+    while (((uint64_t) 1 << num_sq) < t - 1) num_sq++;
+    if (((uint64_t) 1 << num_sq) != t - 1) throw invalid_argument("oblivious_rotation: plain modulus - 1 must be a power of 2");
+
+    Ciphertext x = obl_expand_first_slot_to_row(evaluator, ct_r, gal_keys);   // slots [0, N/2): r;  second row: 0
+    OBL_TRACE("expanded r", x);
+    evaluator.negate_inplace(x);
+    evaluator.add_plain_inplace(x, oc.idx_pl);                                // slot j: j - r  (second row: j, never 0)
+    OBL_TRACE("j - r", x);
+
+    for (int i = 0; i < num_sq; i++) {
+        evaluator.square_inplace(x);
+        evaluator.relinearize_inplace(x, relin_keys);
+        if ((i + 1) % oc.fermat_switch_every == 0 && obl_chain_index(context, x) > 0) {
+            evaluator.mod_switch_to_next_inplace(x);
+        }
+        if (i == 0 || i == num_sq / 2 - 1 || i == num_sq - 1) OBL_TRACE("square " + to_string(i + 1), x);
+    }
+
+    evaluator.negate_inplace(x);
+    evaluator.add_plain_inplace(x, oc.ones_pl);                               // 1 - (j-r)^(p-1)  =  [j == r]
+    OBL_TRACE("unit vector", x);
+    return x;
+}
+
+// the unit vector e_r  ->  n consecutive ones at [r, r+n)   (rotation + add, no multiplication)
+inline Ciphertext oblivious_selector(const SEALContext& context, Evaluator& evaluator, const ObliviousSelCtx& oc,
+                                     const RelinKeys& relin_keys, const GaloisKeys& gal_keys, const Ciphertext& ct_r,
+                                     int data_size) {
+    Ciphertext unit_vec = oblivious_rotation(context, evaluator, oc, relin_keys, gal_keys, ct_r);
+    Ciphertext selector = obl_window_sum(evaluator, unit_vec, data_size, 1, -1, gal_keys);
+    OBL_TRACE("selector", selector);
+    return selector;
+}
+
+// selector (n ones at block (attr, theta)) x P  ->  the n-bit left-child indicator, tiled with period n over the packed region
+inline Ciphertext oblivious_extract_threshold_data(const SEALContext& context, Evaluator& evaluator, const ObliviousSelCtx& oc,
+                                                   const RelinKeys& relin_keys, const GaloisKeys& gal_keys,
+                                                   const Ciphertext& selector, int data_size, int attr_size, int val_size) {
+    Ciphertext sel_local = selector, packed = oc.packed_partitions, extracted;
+    obl_match_levels(context, evaluator, sel_local, packed);
+    evaluator.multiply(sel_local, packed, extracted);
+    evaluator.relinearize_inplace(extracted, relin_keys);
+    evaluator.mod_switch_to_next_inplace(extracted);
+    OBL_TRACE("selector x P", extracted);
+
+    // only block (attr, theta) is non-zero; adding up all A*V blocks moves it to block 0 (blocks 0..b of the result hold it)
+    int blocks = attr_size * val_size;
+    extracted = obl_window_sum(evaluator, extracted, blocks, data_size, +1, gal_keys);
+    // keep only block 0 (CT x PT with a batch-encoded 0/1 mask), otherwise the tiling below would count the block several times
+    evaluator.multiply_plain_inplace(extracted, oc.first_block_mask_pl);
+    evaluator.mod_switch_to_next_inplace(extracted);
+    OBL_TRACE("fold + mask", extracted);
+    // chunk of n slots -> repeated over all A*V blocks (so it lines up with every attribute chunk of the partitions)
+    extracted = obl_window_sum(evaluator, extracted, blocks, data_size, -1, gal_keys);
+    OBL_TRACE("threshold data", extracted);
+    return extracted;
+}
+
+// Oblivious replacement of update_selection_vector: the split is given as two fresh ciphertexts
+//   ct_attr_ind = Enc(threshold_attr_ind, 0, ..., 0)        attribute index in [0, A)
+//   ct_val_ind  = Enc(threshold_val_ind,  0, ..., 0)        split is  x < theta  /  x >= theta,  theta in [1, V-1]
+// Writes the left child  (x_attr <  theta)  to selection_vector[2*parent+1]
+//        the right child (x_attr >= theta)  to selection_vector[2*parent+2].
+inline void oblivious_update_selection_vector(vector<Ciphertext>& selection_vector, const ObliviousSelCtx& oc,
+                                              const Ciphertext& ct_attr_ind, const Ciphertext& ct_val_ind,
+                                              int cur_depth, int curr_node, const SEALContext& context, Evaluator& evaluator,
+                                              const RelinKeys& relin_keys, const GaloisKeys& gal_keys,
+                                              int data_size = data_size_glb, int attr_size = attr_size_glb,
+                                              int val_size = value_size_glb) {
+    int parent_sel_ind = (1 << cur_depth) - 1 + curr_node;
+    int child_sel_ind = parent_sel_ind * 2 + 1;
+
+    // slot of the first datapoint of block (attr, theta) in P:  r = (attr * V + theta) * n.  Linear => plaintext scalars only.
+    Ciphertext ct_r, tmp;
+    evaluator.multiply_plain(ct_attr_ind, obl_const_plain((uint64_t) val_size * data_size), ct_r);
+    evaluator.multiply_plain(ct_val_ind, obl_const_plain((uint64_t) data_size), tmp);
+    evaluator.add_inplace(ct_r, tmp);
+    OBL_TRACE("r", ct_r);
+
+    Ciphertext selector = oblivious_selector(context, evaluator, oc, relin_keys, gal_keys, ct_r, data_size);
+    Ciphertext threshold_data = oblivious_extract_threshold_data(context, evaluator, oc, relin_keys, gal_keys, selector,
+                                                                 data_size, attr_size, val_size);
+
+    Ciphertext parent = selection_vector[parent_sel_ind];
+    obl_match_levels(context, evaluator, parent, threshold_data);
+    evaluator.multiply(parent, threshold_data, selection_vector[child_sel_ind]);
+    evaluator.relinearize_inplace(selection_vector[child_sel_ind], relin_keys);
+    evaluator.mod_switch_to_next_inplace(selection_vector[child_sel_ind]);
+    OBL_TRACE("left child", selection_vector[child_sel_ind]);
+
+    // right = parent - left  (the two children partition the parent's datapoints)
+    evaluator.mod_switch_to_inplace(parent, selection_vector[child_sel_ind].parms_id());
+    evaluator.sub(parent, selection_vector[child_sel_ind], selection_vector[child_sel_ind + 1]);
+}
+
+// Build everything the oblivious update caches: the batch-encoded constant vectors and the packed partitions P.
+// P is obtained from the already preprocessed partitions (only the "x < theta" ones, odd indices 2*theta-1):
+//     P = sum_{theta=1}^{V-1}  rotate_right( first_block_of_every_attribute_chunk(partitions[0][2*theta-1]),  theta * n )
+// (Horner scheme: V-1 rotations by the single step -n.)   Only the single-ciphertext case (iris) is handled.
+inline void build_oblivious_sel_ctx(ObliviousSelCtx& oc, vector<vector<Ciphertext>>& preprocessed_partitions,
+                                    const SEALContext& context, Evaluator& evaluator, BatchEncoder& batch_encoder,
+                                    const GaloisKeys& gal_keys, int data_size = data_size_glb, int attr_size = attr_size_glb,
+                                    int val_size = value_size_glb) {
+    if (preprocessed_partitions.size() != 1) throw invalid_argument("oblivious update: inputs must fit in one ciphertext");
+    if ((size_t) attr_size * val_size * data_size > poly_modulus_degree_glb / 2)
+        throw invalid_argument("oblivious update: A*V*n must fit in one batching row");
+
+    size_t N = poly_modulus_degree_glb;
+    vector<uint64_t> vec(N);
+
+    for (size_t j = 0; j < N; j++) vec[j] = j;
+    batch_encoder.encode(vec, oc.idx_pl);
+    for (size_t j = 0; j < N; j++) vec[j] = 1;
+    batch_encoder.encode(vec, oc.ones_pl);
+    for (size_t j = 0; j < N; j++) vec[j] = (j < (size_t) data_size) ? 1 : 0;
+    batch_encoder.encode(vec, oc.first_block_mask_pl);
+
+    // keeps the first n slots of every attribute chunk (the only slots of the partitions that are meaningful)
+    Plaintext chunk_start_mask;
+    for (size_t j = 0; j < N; j++) vec[j] = (j < (size_t) attr_size * val_size * data_size && (j % ((size_t) val_size * data_size)) < (size_t) data_size) ? 1 : 0;
+    batch_encoder.encode(vec, chunk_start_mask);
+
+    Ciphertext acc;
+    for (int theta = val_size - 1; theta >= 1; theta--) {
+        Ciphertext masked;
+        evaluator.multiply_plain(preprocessed_partitions[0][2 * theta - 1], chunk_start_mask, masked);
+        if (theta == val_size - 1) {
+            acc = masked;
+        } else {
+            evaluator.rotate_rows_inplace(acc, obl_norm_step(-data_size), gal_keys);
+            evaluator.add_inplace(acc, masked);
+        }
+    }
+    evaluator.rotate_rows_inplace(acc, obl_norm_step(-data_size), gal_keys);
+    oc.packed_partitions = acc;
+}
+
+// ---- plaintext reference for testing (needs the secret key: only used in the single-process simulation) ----
+
+// x[j][a] = value of attribute a of datapoint j, recovered from the one-hot ciphertext inputs_X[0]
+inline vector<vector<int>> obl_decode_dataset(const Ciphertext& input_x, Decryptor& decryptor, BatchEncoder& batch_encoder,
+                                              int data_size = data_size_glb, int attr_size = attr_size_glb, int val_size = value_size_glb) {
+    Plaintext pl;
+    vector<uint64_t> dec;
+    decryptor.decrypt(input_x, pl);
+    batch_encoder.decode(pl, dec);
+    vector<vector<int>> x(data_size, vector<int>(attr_size, -1));
+    for (int a = 0; a < attr_size; a++)
+        for (int v = 0; v < val_size; v++)
+            for (int j = 0; j < data_size; j++)
+                if (dec[(size_t) a * val_size * data_size + v * data_size + j] == 1) x[j][a] = v;
+    return x;
+}
+
+// Re-trains the selection vectors in the clear (root = everything; node i splits on x[.][split_attr[i]] < split_val[i]) and
+// compares with the decrypted selection vectors of all nodes below the root, in every block of the packed region.
+// Returns the number of wrong slots (0 = the oblivious update is correct).  Levels 0 .. depth-2 hold splits.
+inline int verify_oblivious_selection_vectors(const vector<Ciphertext>& selection_vector, const vector<int>& split_attr,
+                                              const vector<int>& split_val, const vector<vector<int>>& x, int depth,
+                                              Decryptor& decryptor, BatchEncoder& batch_encoder, const SEALContext& context,
+                                              int data_size = data_size_glb, int attr_size = attr_size_glb, int val_size = value_size_glb) {
+    int num_nodes = (1 << depth) - 1;     // nodes of the first depth levels; internal ones: first 2^(depth-1) - 1
+    vector<vector<int>> expected(num_nodes, vector<int>(data_size, 0));
+    fill(expected[0].begin(), expected[0].end(), 1);
+    Plaintext pl;
+    vector<uint64_t> dec;
+    int wrong = 0;
+    for (int parent = 0; parent < (1 << (depth - 1)) - 1; parent++) {
+        for (int j = 0; j < data_size; j++) {
+            bool in_left = x[j][split_attr[parent]] < split_val[parent];
+            expected[2 * parent + 1][j] = expected[parent][j] && in_left;
+            expected[2 * parent + 2][j] = expected[parent][j] && !in_left;
+        }
+        for (int c = 2 * parent + 1; c <= 2 * parent + 2; c++) {
+            decryptor.decrypt(selection_vector[c], pl);
+            batch_encoder.decode(pl, dec);
+            for (int blk = 0; blk < attr_size * val_size; blk++)
+                for (int j = 0; j < data_size; j++)
+                    if ((int) dec[(size_t) blk * data_size + j] != expected[c][j]) wrong++;
+        }
+    }
+    return wrong;
+}

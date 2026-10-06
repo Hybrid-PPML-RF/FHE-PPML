@@ -45,3 +45,6 @@ include_directories( ${OPENMP_INCLUDES} )
 
 add_executable( ppml main_integrity.cpp )
 target_link_libraries(ppml SEAL::seal ntl m gmp)
+
+add_executable( test_obl test_oblivious_update_sel.cpp )
+target_link_libraries(test_obl SEAL::seal ntl m gmp)
