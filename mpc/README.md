@@ -1,3 +1,14 @@
+> **Reproducing the paper's results:** follow the [README in the repository root](../README.md). It builds this fork
+> (`scripts/build_mpspdz.sh`), runs `Programs/Source/bench_fhe.py` (MPC part of our protocol, Table 4/5) and
+> `bench_fhe_naive.py` (MPC-only baseline, Figure 5) with 10 parties of `sy-shamir-party.x`, locally or on 10 machines
+> (`scripts/run_mpc.sh`), and builds the tables and the figure (`scripts/make_results.py`).
+> Program arguments: `bench_fhe n m alpha t d` and `bench_fhe_naive n m alpha t d bins` with the parameters of
+> `scripts/datasets.csv` (iris 100 4 9 3, wine 119 13 11 3, cancer 380 30 18 2, digits 1203 64 17 10; alpha = 8 with
+> 8 bins). The older helper scripts in this directory (`artifact.sh`, `artifact_test.sh`, `compile-parties*.sh`,
+> `launch-parties*.sh`, `run.sh`) are kept for reference only: they use outdated program arguments (e.g. `artifact.sh`
+> uses m = 23 for wine instead of 13, and parses logs named `bench_fhe2-*`), `/home/ubuntu/...` paths, and the SSL
+> certificates committed in `Player-Data/` expired in July 2026 (`../scripts/setup_ssl.sh 10` creates new ones).
+
 ## Automated Running
 Runnign in a single machine can be done as follows:
 ```

@@ -1,0 +1,13 @@
+# Experiment parameters shared by all scripts (run_*.sh and make_results.py).
+#   name   : dataset name used on the command line
+#   ppml_id: first argument of ./ppml (1 iris, 2 wine, 3 cancer, 4 digits)
+#   n      : number of training samples          (paper, Table 5)
+#   m      : number of attributes A               (paper, Table 5)
+#   alpha  : distinct values per attribute, no binning (paper, Table 5); with binning alpha = 8
+#   t      : number of labels                     (paper, Table 5)
+#   label  : name printed in the tables / figure
+name,ppml_id,n,m,alpha,t,label
+iris,1,100,4,9,3,Iris
+wine,2,119,13,11,3,Wine
+cancer,3,380,30,18,2,Cancer
+digits,4,1203,64,17,10,Digits

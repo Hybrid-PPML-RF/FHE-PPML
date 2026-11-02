@@ -1,0 +1,45 @@
+Start training with #attr: 2 #val: 8
+Modulus chain of the data ring (N=16384): 8 primes + special = 306 bits (128-bit security bound: 438)
+Encoding inputs to 1 ciphertexts...
+Initial noise budget: 247 bits
+Preprocessing for all possible threshold values...
+   Input X preprocessed.
+   Input Y preprocessed.
+Preprocess time: 2182393 us.
+Selection from shares: 10 servers, packed, 162 nodes per share ciphertext
+	Training for level 0 with 1 nodes...
+		level 0: 1 share ciphertext(s) per server, 2048 KiB, chain index 7; encryption 18.602 ms per server, aggregation of the 10 shares 2.857 ms
+		level 0: oblivious group computation 190 ms, nodes (partitions + selection update + attribute re-selection) 24698 ms
+	Training for level 1 with 2 nodes...
+		level 1: 1 share ciphertext(s) per server, 2048 KiB, chain index 7; encryption 16.41 ms per server, aggregation of the 10 shares 5.955 ms
+		level 1: oblivious group computation 171 ms, nodes (partitions + selection update + attribute re-selection) 41629 ms
+	Training for level 2 with 4 nodes...
+		level 2: 1 share ciphertext(s) per server, 1792 KiB, chain index 6; encryption 14.594 ms per server, aggregation of the 10 shares 2.554 ms
+		level 2: oblivious group computation 149 ms, nodes (partitions + selection update + attribute re-selection) 10820 ms
+	Training for level 3 with 8 nodes...
+		level 3: 1 share ciphertext(s) per server, 1536 KiB, chain index 5; encryption 18.71 ms per server, aggregation of the 10 shares 3.11 ms
+		level 3: oblivious group computation 191 ms, nodes (partitions + selection update + attribute re-selection) 16683 ms
+	Training for level 4 with 16 nodes...
+		level 4: 1 share ciphertext(s) per server, 1280 KiB, chain index 4; encryption 14.689 ms per server, aggregation of the 10 shares 1.954 ms
+		level 4: oblivious group computation 151 ms, nodes (partitions + selection update + attribute re-selection) 25090 ms
+	Training for level 5 with 32 nodes...
+		level 5: oblivious group computation 0 ms, nodes (partitions + selection update + attribute re-selection) 30849 ms
+Share ciphertexts per server: 5, 8704 KiB (uncompressed); encryption 83.0074 ms per server, aggregation 16.43 ms
+Calculating the labeling for leaf nodes...
+	0
+Simulate the packing and extraction...
+	budget of the node partitions entering the packing: 0
+	budget after packing: 0
+	(one machine, the share encryptions of all 10 servers in sequence: 152101709 us)
+Training + labeling + packing total runtime: 151354645 us.
+
+=== Integrity check: Y' x C' pipeline ===
+Pack commitment in 1 ciphertexts, eaching packing 162 chunks.
+inputs_Y[0] budget at chain 3: 145 bits
+	packing labels... 0
+Y' budget: 111 bits
+C' budget: 111 bits
+H'' final noise budget (chain 2): 43 bits
+C'x before packing final noise budget (chain 1): 43 bits
+C'' final packing noise budget (chain 0): 9 bits
+Integrity Runtime for all : 1847293 ms.

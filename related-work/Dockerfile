@@ -17,9 +17,8 @@ ENV DEBIAN_FRONTEND=noninteractive TZ=UTC LANG=C.UTF-8
 
 # ── System dependencies ───────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        automake build-essential clang cmake git \
-        libboost-dev libboost-thread-dev \
-        libgmp-dev libntl-dev libsodium-dev libssl-dev \
+        automake build-essential clang cmake git ca-certificates bzip2 \
+        libgmp-dev libntl-dev libsodium-dev libssl-dev zlib1g-dev libbz2-dev \
         libtool m4 python3 python3-dev python3-pip \
         texinfo yasm curl wget \
         libdpkg-perl \
@@ -27,9 +26,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip3 install --no-cache-dir scikit-learn pandas numpy mpyc
 
+# ── Boost >= 1.75 (Ubuntu 22.04 has 1.74; MP-SPDZ's libOTe needs 1.75, and the boost download of the cryptoTools
+#    version pinned by the Bhardwaj et al. fork points to a mirror that no longer exists) ─────────────────────────
+RUN set -eux; \
+    curl -fsSL -o /tmp/boost.tar.bz2 https://archives.boost.io/release/1.83.0/source/boost_1_83_0.tar.bz2; \
+    echo "6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e  /tmp/boost.tar.bz2" | sha256sum -c -; \
+    tar xjf /tmp/boost.tar.bz2 -C /tmp; cd /tmp/boost_1_83_0; \
+    ./bootstrap.sh --prefix=/usr/local --with-libraries=system,thread,filesystem,iostreams,regex,chrono,atomic,date_time; \
+    ./b2 -j"$(nproc)" -d0 link=shared,static threading=multi variant=release install; \
+    cd /; rm -rf /tmp/boost*; ldconfig
+
 # ── Build MP-SPDZ (main branch = Hamada + Abspoel) ───────────────────────
 WORKDIR /opt/mp-spdz
-RUN git clone --depth 1 https://github.com/data61/MP-SPDZ.git .
+RUN git clone --depth 1 --branch v0.4.1 https://github.com/data61/MP-SPDZ.git .
 
 # Build the two protocol binaries most relevant to the paper's comparison:
 #   replicated-ring-party.x  — 3-party honest-majority ring (≈ paper's model)
@@ -37,11 +46,12 @@ RUN git clone --depth 1 https://github.com/data61/MP-SPDZ.git .
 #   mascot-party.x           — 2-party malicious (strongest security)
 RUN make -j$(nproc) replicated-ring-party.x semi2k-party.x
 
-# ── Build Bhardwaj et al. fork (PR #1449, branch PrivateDT) ──────────────
-# Clone the fork; if unreachable, skip gracefully (set BHARDWAJ_AVAILABLE=0)
+# ── Build Bhardwaj et al. fork (PR #1449 = branch master of sandy9999/MP-SPDZ, pinned to its head commit) ──
+# (the branch "PrivateDT" used before does not exist). If unreachable, skip (BHARDWAJ_AVAILABLE=0).
+# The root Dockerfile of FHE-PPML builds the same fork for Figure 5 / Table 5 (scripts/build_bhardwaj.sh).
 WORKDIR /opt/mp-spdz-bhardwaj
-RUN git clone --depth 1 --branch PrivateDT \
-        https://github.com/sandy9999/MP-SPDZ.git . \
+RUN git init -q . && git remote add origin https://github.com/sandy9999/MP-SPDZ.git \
+    && git fetch -q --depth 1 origin 87d1e5c7850fff6b91de95efb6e62752b5891d7f && git checkout -q FETCH_HEAD \
     && make -j$(nproc) replicated-ring-party.x semi2k-party.x \
     && echo "BHARDWAJ_AVAILABLE=1" > /opt/bhardwaj_status \
     || (echo "BHARDWAJ_AVAILABLE=0" > /opt/bhardwaj_status \

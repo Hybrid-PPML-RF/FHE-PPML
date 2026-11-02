@@ -1,0 +1,26 @@
+# keep the build context small and free of local build products
+.git
+**/.DS_Store
+**/__pycache__
+build/
+results/
+launch_logs/
+*.tex
+# MP-SPDZ: local builds, compiled programs, Python venv, logs and the (expired) committed certificates
+mpc/venv/
+mpc/deps/
+mpc/local/
+mpc/logs/
+mpc/Player-Data/
+mpc/Programs/Bytecode/
+mpc/Programs/Schedules/
+mpc/Programs/Public-Input/
+mpc/Programs/Functions/
+mpc/BENCHMARKS/
+mpc/*.x
+mpc/*.so
+mpc/*.a
+mpc/**/*.o
+mpc/**/*.d
+# the related-work image is built separately (related-work/Dockerfile)
+related-work/

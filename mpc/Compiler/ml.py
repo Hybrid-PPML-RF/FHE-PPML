@@ -163,6 +163,34 @@ def argmax(x):
         res = cint(res)
     return res
 
+def argmax_onehot(x):
+    """ Compute the one-hot encoding of the index of the maximum element,
+    without computing or revealing the index. Same tournament and
+    tie-breaking as :py:func:`argmax`: every merge keeps its comparison
+    bit instead of multiplexing the index, and the bits are expanded
+    top-down into the one-hot vector, one multiplication per merge except
+    the root.
+
+    :param x: iterable of sint (or sint vectors, evaluated element-wise)
+    :returns: list of ``len(x)`` secret bits, exactly one of them 1
+    """
+    def op(a, b):
+        comp = b[0].less_than(a[0], sync=False)
+        return comp.if_else(a[0], b[0]), (comp, a[1], b[1])
+    root = tree_reduce(op, [(v, k) for k, v in enumerate(x)])[1]
+    res = [None] * len(x)
+    def expand(node, w):
+        # w is None for the public weight 1 of the root
+        if not isinstance(node, tuple):
+            res[node] = 1 if w is None else w
+            return
+        comp, left, right = node
+        w_left = comp if w is None else w * comp
+        expand(left, w_left)
+        expand(right, 1 - comp if w is None else w - w_left)
+    expand(root, None)
+    return res
+
 def softmax(x):
     """ Softmax.
 

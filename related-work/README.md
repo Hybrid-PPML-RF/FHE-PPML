@@ -1,5 +1,11 @@
 # Related-Work: Private Decision Tree / Random Forest Training
 
+> **Reproducing the paper's Figure 5 / Table 5:** use the image of the repository root (`../Dockerfile`,
+> `../README.md`). It builds the Bhardwaj et al. fork itself (`scripts/build_bhardwaj.sh`) and runs it with
+> `scripts/run_baselines.sh`; the numbers of Akavia et al. [4] and Shin et al. [39] in Figure 5 are scaled
+> microbenchmarks (`scripts/baselines_reported.csv`), not runs of the code below. This image is an optional
+> playground for the other related work (Hamada et al., Abspoel et al., MPyC RF, the code of Akavia et al.).
+
 Docker image that wraps the publicly available implementations of related work
 cited in *Private Random Forest Training via FHE and MPC*.
 
@@ -9,7 +15,7 @@ cited in *Private Random Forest Training via FHE and MPC*.
 |---|---|---|
 | Hamada et al. PoPETs 2023 | `TreeTrainer` in MP-SPDZ | [data61/MP-SPDZ](https://github.com/data61/MP-SPDZ) |
 | Abspoel et al. PoPETs 2021 | `TreeClassifier` in MP-SPDZ | [data61/MP-SPDZ](https://github.com/data61/MP-SPDZ) |
-| Bhardwaj et al. CCS 2024 | PR #1449 on fork | [sandy9999/MP-SPDZ](https://github.com/sandy9999/MP-SPDZ), branch `PrivateDT` |
+| Bhardwaj et al. CCS 2024 | PR #1449 on fork | [sandy9999/MP-SPDZ](https://github.com/sandy9999/MP-SPDZ), branch `master` (head of PR #1449, commit `87d1e5c`) |
 | Abspoel et al. RF variant | MPyC implementation | [philips-software/random_forest](https://github.com/philips-software/random_forest) |
 | Akavia et al. TOPSEC 2022 | CKKS/SEAL FHE training | [intuit/Decision-Trees-over-FHE](https://github.com/intuit/Decision-Trees-over-FHE) |
 
@@ -102,7 +108,7 @@ related-work/
 
 - Random forest feature bagging uses `ceil(√m)` features per tree, selected at
   compile time with seed 42 (not secret). Bootstrap sampling is disabled.
-- The Bhardwaj et al. improvement is in the fork's `Compiler/decision_tree.py`;
-  the `.mpc` program is structurally identical to `dt_train.mpc`.
+- The Bhardwaj et al. improvement is in the fork's `Compiler/decision_tree.py`, whose `TreeTrainer`
+  takes attribute-major data and binary labels (`dt_train_bhardwaj.mpc` is adapted accordingly).
 - Wall-clock time is printed at the end of each run; MP-SPDZ also reports
   per-party communication cost in its own output.

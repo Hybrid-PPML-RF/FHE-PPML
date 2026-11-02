@@ -54,3 +54,9 @@ target_link_libraries(test_rs SEAL::seal ntl m gmp)
 
 add_executable( test_orsw test_oblivious_rs.cpp )
 target_link_libraries(test_orsw SEAL::seal ntl m gmp)
+
+add_executable( test_omulti test_oblivious_multi.cpp )
+target_link_libraries(test_omulti SEAL::seal ntl m gmp)
+
+add_executable( test_share test_share_select.cpp )
+target_link_libraries(test_share SEAL::seal ntl m gmp)

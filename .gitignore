@@ -1,0 +1,16 @@
+# outputs of the reproduction scripts (README) and local builds
+results/
+launch_logs/
+build/
+__pycache__/
+# MP-SPDZ build products (scripts/build_mpspdz.sh) and compiled programs
+mpc/deps/
+mpc/local/
+mpc/logs/
+mpc/*.x
+mpc/*.so
+mpc/*.a
+mpc/**/*.o
+mpc/**/*.d
+mpc/Programs/Bytecode/
+mpc/Programs/Schedules/

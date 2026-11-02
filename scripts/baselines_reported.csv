@@ -1,0 +1,19 @@
+# Baseline runtimes that this artifact does NOT measure (input of scripts/make_results.py, Figure 5).
+#
+# [4]  Akavia et al. (CKKS, single server, semi-honest) and [39] Shin et al. (CKKS, single server, semi-honest):
+#      no reliable public code for an end-to-end run with our parameters. As described in the evaluation section of
+#      the paper, the authors ran microbenchmarks on the machines reported in [4]/[39] and scaled the runtimes to our
+#      parameter sets. The values below are the ones plotted in Figure 5 of the paper, rounded to the digits printed
+#      on the bars ("1.9M" -> 1900000). They are estimates, not measurements of this artifact.
+#      (related-work/ contains a Docker image that builds and runs the code of [4]; it is not used for Figure 5.)
+#
+# series: akavia = [4], shin = [39]; runtime_s: seconds for training a random forest of 100 trees
+series,dataset,runtime_s,source
+akavia,iris,52900,scaled microbenchmark (paper Fig. 5)
+akavia,wine,164200,scaled microbenchmark (paper Fig. 5)
+akavia,cancer,297800,scaled microbenchmark (paper Fig. 5)
+akavia,digits,1900000,scaled microbenchmark (paper Fig. 5)
+shin,iris,12600,scaled microbenchmark (paper Fig. 5)
+shin,wine,18900,scaled microbenchmark (paper Fig. 5)
+shin,cancer,69100,scaled microbenchmark (paper Fig. 5)
+shin,digits,429200,scaled microbenchmark (paper Fig. 5)

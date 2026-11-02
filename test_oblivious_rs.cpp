@@ -10,7 +10,7 @@
 // test_oblivious_update_sel.cpp).
 //
 // usage: ./test_orsw [N_small n A V depth  shared_n shared_bits special_small_bits  extra_bits special_big_bits  log_base  stress]
-//   shared_n  primes of the small data chain (0 = depth + 4, the number the update needs)
+//   shared_n  primes of the small data chain (0 = depth + 3, the number the update needs: P, mask, depth-2 updates, 2 for the node processing, + 1 base)
 //   stress    k > 0: k random groups on the root instead of a tree (min budgets over many random splits)
 
 #include <chrono>
@@ -36,7 +36,7 @@ int main(int argc, char* argv[]) {
 	const int depth = arg(5, 3);
 	depth_glb = depth;
 	int shared_n = arg(6, 0);
-	if (shared_n == 0) shared_n = depth + 4;
+	if (shared_n == 0) shared_n = depth + 3;
 	const int shared_bits = arg(7, 40), special_small_bits = arg(8, 40);
 	const int extra_bits = arg(9, 40), special_big_bits = arg(10, 50);
 	const int log_base = arg(11, 8);
@@ -183,7 +183,7 @@ int main(int argc, char* argv[]) {
 	vector<int> split_attr(num_internal), split_val(num_internal);
 	mt19937 rng(1234);
 	long long eq_us = 0, ext_us = 0, apply_us = 0;
-	int groups_done = 0, nodes_done = 0;
+	int groups_done = 0, nodes_done = 0, sel_bad_groups = 0;
 	for (int d = 0; d < depth - 1; d++) {
 		for (int first = 0; first < (1 << d); first += G) {
 			int cnt = min(G, (1 << d) - first);
@@ -214,8 +214,33 @@ int main(int argc, char* argv[]) {
 			ext_us += duration_cast<microseconds>(a2 - a1).count() + duration_cast<microseconds>(a3 - a2).count();
 			apply_us += duration_cast<microseconds>(a4 - a3).count();
 			groups_done++; nodes_done += cnt;
+
+			// slot-level check of the ring-switched selector (not timed): in region g it must hold selector_scale exactly on the n slots
+			// [r n, (r+1) n) of chunk r = attr * V + theta, and 0 everywhere else (unused regions carry attr = theta = 0, i.e. chunk 0)
+			{
+				vector<uint64_t> sd;
+				dec_small.decrypt(selector, pl);
+				batch_small.decode(pl, sd);
+				vector<uint64_t> expect(N_small, 0);
+				for (int g = 0; g < oc.group_size; g++) {
+					int r = g < cnt ? as[g] * V + ts[g] : 0, base = obl_region_base(oc, g);
+					for (int o = r * n; o < (r + 1) * n; o++) expect[base + o] = oc.selector_scale;
+				}
+				int e = 0;
+				for (size_t j = 0; j < N_small; j++) e += (sd[j] != expect[j]);
+				sel_bad_groups += (e != 0);
+				if (groups_done == 1) {
+					for (int g = 0; g < min(cnt, 2); g++) {
+						int r = as[g] * V + ts[g], base = obl_region_base(oc, g), lo = -1, hi = -1;
+						for (int o = 0; o < oc.region_size; o++) if (sd[base + o]) { if (lo < 0) lo = o; hi = o + 1; }
+						cout << "  selector of node " << g << ": split (attr " << as[g] << ", theta " << ts[g] << ") = chunk r = " << r
+						     << ", non-zero slots of its region: [" << lo << ", " << hi << ") = [r*n, (r+1)*n) = [" << r * n << ", " << (r + 1) * n << ")\n";
+					}
+				}
+			}
 		}
 	}
+	cout << "selector check (every group, every slot): " << (sel_bad_groups ? to_string(sel_bad_groups) + " groups WRONG" : string("ok")) << endl;
 	cout << "groups: " << groups_done << " (" << nodes_done << " nodes); single-threaded totals: equality test in the big ring " << eq_us / 1000
 	     << " ms, ring switch + extraction (P, fold, mask, tile) " << ext_us / 1000 << " ms, per-node application " << apply_us / 1000
 	     << " ms; all: " << (eq_us + ext_us + apply_us) / 1000 << " ms\n";

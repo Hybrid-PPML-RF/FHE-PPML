@@ -2,14 +2,19 @@
 Decision tree training — Bhardwaj et al. CCS 2024
 "Securely Training Decision Trees Efficiently" (ePrint 2024/1077)
 Microsoft Research India — implemented in MP-SPDZ PR #1449
-(fork: https://github.com/sandy9999/MP-SPDZ, branch PrivateDT)
+(fork: https://github.com/sandy9999/MP-SPDZ, branch master, commit 87d1e5c)
 
 Communication complexity O(mN log N + hmN + hN log N),
 improvement of ~min(h, m, log N) over Hamada et al.
 
-This file is identical in structure to dt_train.mpc; the algorithmic
-improvement is in the Bhardwaj fork's Compiler/decision_tree.py.
+The algorithmic improvement is in the fork's Compiler/decision_tree.py, whose
+TreeTrainer has a different interface than upstream MP-SPDZ:
+TreeTrainer(x, y, h, binary=False, attr_lengths=None, n_threads=None).train(),
+with x attribute-major (m rows of n values) and BINARY labels y (multi-class
+labels are not supported by the fork; n_classes is ignored here).
 Use with /opt/mp-spdz-bhardwaj instead of /opt/mp-spdz.
+The FHE-PPML reproduction (scripts/run_baselines.sh) uses the fork's own
+Programs/Source/bench-dt.mpc instead.
 
 Compile (from /opt/mp-spdz-bhardwaj):
   ./compile.py -R 64 dt_train_bhardwaj <n_train> <m> <n_levels> <n_classes> [n_threads]
@@ -30,15 +35,17 @@ print_ln("=== Decision Tree (Bhardwaj et al. CCS 2024) ===")
 print_ln("n_train=%s  m=%s  depth=%s  classes=%s  threads=%s",
          n_train, m, n_levels, n_classes, n_threads)
 
-X = sint.Matrix(n_train, m)
+X = sint.Matrix(m, n_train)          # attribute-major, as the fork's TreeTrainer expects
 y = sint.Array(n_train)
 
 @for_range_opt(n_train)
 def _(i):
-    X[i].assign_vector(sint.get_input_from(0, size=m))
+    row = sint.get_input_from(0, size=m)
+    for j in range(m):
+        X[j][i] = row[j]
     y[i] = sint.get_input_from(0)
 
-trainer = TreeTrainer(X, y, n_levels, n_threads=n_threads, n_classes=n_classes)
-trainer.fit()
+trainer = TreeTrainer(X, y, n_levels, n_threads=n_threads)
+trainer.train()
 
 print_ln("=== Training complete ===")

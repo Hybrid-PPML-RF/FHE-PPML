@@ -1,0 +1,37 @@
+Start training with #attr: 2 #val: 8
+Modulus chain of the data ring (N=16384): 8 primes + special = 306 bits (128-bit security bound: 438)
+Encoding inputs to 1 ciphertexts...
+Initial noise budget: 247 bits
+Preprocessing for all possible threshold values...
+   Input X preprocessed.
+   Input Y preprocessed.
+Preprocess time: 3031747 us.
+	Training for level 0 with 1 nodes...
+		level 0: oblivious group computation 0 ms, nodes (partitions + selection update + attribute re-selection) 29168 ms
+	Training for level 1 with 2 nodes...
+		level 1: oblivious group computation 0 ms, nodes (partitions + selection update + attribute re-selection) 52633 ms
+	Training for level 2 with 4 nodes...
+		level 2: oblivious group computation 0 ms, nodes (partitions + selection update + attribute re-selection) 10222 ms
+	Training for level 3 with 8 nodes...
+		level 3: oblivious group computation 0 ms, nodes (partitions + selection update + attribute re-selection) 16757 ms
+	Training for level 4 with 16 nodes...
+		level 4: oblivious group computation 0 ms, nodes (partitions + selection update + attribute re-selection) 22749 ms
+	Training for level 5 with 32 nodes...
+		level 5: oblivious group computation 0 ms, nodes (partitions + selection update + attribute re-selection) 32750 ms
+Calculating the labeling for leaf nodes...
+	0
+Simulate the packing and extraction...
+	budget of the node partitions entering the packing: 0
+	budget after packing: 0
+Training + labeling + packing total runtime: 166190891 us.
+
+=== Integrity check: Y' x C' pipeline ===
+Pack commitment in 1 ciphertexts, eaching packing 162 chunks.
+inputs_Y[0] budget at chain 3: 145 bits
+	packing labels... 0
+Y' budget: 111 bits
+C' budget: 111 bits
+H'' final noise budget (chain 2): 43 bits
+C'x before packing final noise budget (chain 1): 43 bits
+C'' final packing noise budget (chain 0): 9 bits
+Integrity Runtime for all : 2560446 ms.

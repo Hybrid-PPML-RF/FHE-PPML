@@ -1,5 +1,7 @@
 #include "seal/seal.h"
 #include "util.h"
+#include "oblivious_multi.h"
+#include "share_select.h"
 #include "global.h"
 #include "seal/util/iterator.h"
 #include <numeric>
@@ -77,36 +79,70 @@ int main(int argc, char* argv[]) {
 	EncryptionParameters bgv_params(scheme_type::bgv);
 	bgv_params.set_poly_modulus_degree(poly_modulus_degree_glb);
 
-	// For the oblivious selection-vector update (iris only, see util.h) the chain is
+	// For the oblivious selection-vector update (util.h: P in one ciphertext, oblivious_multi.h: P in several) the chain is
 	//     [ 1 base prime ]  +  [ oblivious_levels primes ]  +  [ special prime ]
-	// Every level of the chain is consumed by exactly one ciphertext-ciphertext multiplication (followed by one mod switch):
-	//     eq_levels  equality test of ObliviousRotation: 5 with the polynomial test (default), 16 squarings with Qelect's x^(p-1)
-	//   +  3  selector x P, mask of block 0, selection_vector x threshold_data      (first update)
-	//   + (depth-2)  one more selection_vector x threshold_data for each further tree level
+	// Every level of the chain is consumed by exactly one ciphertext-ciphertext (or ciphertext-plaintext) multiplication followed by a mod switch:
+	//     eq_levels  equality test of ObliviousRotation: 5 for iris with the polynomial test (default), 16 squarings with Qelect's x^(p-1)
+	//   +  2  selector x P, mask of block 0      (+ 1 more for the stretch of the compact one-hot in the multi-ciphertext layout)
+	//         -- the root's selection vector is public, so the first update is S_left = T without a multiplication --
+	//   + (depth-2)  one selection_vector x threshold_data for each further tree level
 	//   +  2  deepest level: partitions x selection_vector, and the leaf labeling below, which first mod-switches the selection
 	//         vector one level down and then multiplies (i.e. that multiplication is done on the last-but-one level)
 	// With ring switching (default) the equality test does not count for the ring of the data ciphertexts, see below.
 	// Prime size (N = 16384, p = 65537, test_oblivious_update_sel.cpp, depth-6 tree walk, single ring):
 	//   polynomial test: any size from 40 to 50 bits works (the chain is short, noise cannot run away)
 	//   Fermat test:     44 bits diverges, 46 bits is marginal (5 of 31 nodes lost all their budget), 48 and 50 bits work -> 50 bits
-	// optional 7th argument: 0 = keep the original plaintext split + original modulus chain on iris too (for runtime comparison)
-	const bool oblivious_update = (dataset == 1) && !(argc > 7 && std::stoi(argv[7]) == 0);
+	// optional 7th argument: the selection-vector update.
+	//   0 = original plaintext split (the split is opened; original modulus chain), for runtime comparison
+	//   1 = private model, oblivious update in FHE: equality test on the encrypted split, ring switching (util.h, oblivious_multi.h)
+	//   2 = private model, selection in MPC (default, share_select.h): BestSplit outputs the one-hot of the split in shares, the
+	//       servers compute the shares of the left-child indicator from their shares of the data and encrypt them; the FHE side is
+	//       the plaintext-split path with a fresh ciphertext as threshold data (original modulus chain)
+	const int update_mode = argc > 7 ? std::stoi(argv[7]) : 2;
+	const bool oblivious_update = update_mode == 1;
+	const bool share_update = update_mode == 2;
+	// optional 13th argument (mode 2): 1 = every server encrypts its share already tiled, one ciphertext per node (no extraction);
+	//                                   0 (default) = packed, floor((N/2)/n) nodes per batching row
+	// optional 14th argument (mode 2): number of servers M (default 10, as in the benchmarks); every server encrypts its share
+	const bool share_tiled = share_update && argc > 13 && std::stoi(argv[13]) != 0;
+	const int num_servers = argc > 14 ? std::stoi(argv[14]) : 10;
+	// optional 15th argument (modes 0 and 2): prime size of the original modulus chain (default 34 bits, as in the original code).
+	// With real (non-zero) selection vectors 34 bits leave no budget for the leaf labeling at depth 6; 40 bits do (still < 438 bits).
+	const int orig_prime_bits = argc > 15 ? std::stoi(argv[15]) : 34;
+	// optional 11th argument: 1 = force the multi-ciphertext layout (oblivious_multi.h) even if P fits one ciphertext (testing)
+	// Single-ciphertext layout (util.h) when the partitions of all attributes and thresholds fit one batching row (iris), otherwise
+	// P is a vector of ciphertexts and the selection first picks the ciphertext and then the block (oblivious_multi.h: wine, cancer, digits).
+	const bool use_multi = oblivious_update && ((argc > 11 && std::stoi(argv[11]) != 0) ||
+		(size_t) attr_size_glb * value_size_glb * data_size_glb > poly_modulus_degree_glb / 2);
 	// optional 8th argument: switch the preprocessed partitions down, once per tree level, to the level of that level's selection
-	// vectors before they are used (default: on for the oblivious update, whose modulus chain is longer than the selection
-	// vectors need at the deeper levels; off for the original path so that it stays a faithful baseline)
-	const bool level_switch = argc > 8 ? (std::stoi(argv[8]) != 0) : oblivious_update;
-	// optional 9th argument: 0 = Qelect's x^(p-1) equality test, 1 (default) = low-depth polynomial equality test
-	const bool equality_poly = !(argc > 9 && std::stoi(argv[9]) == 0);
+	// vectors before they are used (default: on, for the original and the oblivious path)
+	const bool level_switch = argc > 8 ? (std::stoi(argv[8]) != 0) : true;   // default on, for the original path as well
+	// optional 9th argument: 0 = Qelect's x^(p-1) equality test, 1 (default) = low-depth polynomial equality test (single-ciphertext layout only)
+	const bool equality_poly = use_multi || !(argc > 9 && std::stoi(argv[9]) == 0);
+	// optional 12th argument: 0 = keep all ciphertexts of the simulated data (memory: gigabytes for digits).  Default (1): "simulated reuse".
+	// The node processing of this benchmark works on vectors of ciphertexts of which only the first one is ever looked at again: the
+	// per-node copies of the partitions are identical, and the later stages only read the first output of every node.  So only 2
+	// distinct input ciphertexts are preprocessed, the work for the logical number of ciphertexts is still done (the stored one is used over
+	// and over), and all outputs but the first one of each node are dropped as soon as they are computed.  The amount of computation of the
+	// training phase is unchanged; only preprocessing (not part of the reported training runtime) is done for 2 of the input ciphertexts.
+	const bool sim_reuse = !(argc > 12 && std::stoi(argv[12]) == 0);
 	// optional 10th argument: 1 (default) = ring switching: the split ciphertexts and the equality test live in a second context with
-	// ring dimension 2N (secure for the 5 extra levels of the test), the selector is then switched to the ring of the data (N), whose
+	// ring dimension 2N (secure for the extra levels of the test), the selector is then switched to the ring of the data (N), whose
 	// modulus stays within the 128-bit security bound.  0 = everything in one ring (the chain is then longer than the bound).
-	const bool use_rs = oblivious_update && equality_poly && !(argc > 10 && std::stoi(argv[10]) == 0);
+	const bool use_rs = oblivious_update && equality_poly && (use_multi || !(argc > 10 && std::stoi(argv[10]) == 0));
+	// levels of the equality test: the polynomial test is a product tree over the (V-1) + A factors; for the multi-ciphertext layout it
+	// runs on the compact one-hot over A*(V-1) blocks, whose digits are the same attribute / threshold digits
 	const int eq_levels = oblivious_equality_levels(equality_poly, attr_size_glb, value_size_glb, p);
 	const int eq_levels_small = use_rs ? 0 : eq_levels;     // levels of the equality test that are taken from the chain of the data ring
-	const int oblivious_levels = oblivious_update ? (eq_levels_small + 3 + max(depth_glb - 2, 0) + 2) : 0;
+	// = [selector x P, mask] (single-ciphertext layout) or [stretch, selector x P, mask] (multi-ciphertext layout: one more level) for the first
+	// update (the root is public: S_left = T, no multiplication), one S x T per further tree level, 2 for the node processing at the deepest level
+	const int oblivious_levels = oblivious_update ? (eq_levels_small + (use_multi ? 3 : 2) + max(depth_glb - 2, 0) + 2) : 0;
 
 	vector<Modulus> coeff_modulus, coeff_modulus_big;
-	const int small_prime_bits = 40, small_special_bits = 38, big_extra_bits = 40, big_special_bits = 50;
+	// prime sizes of the data ring: 40 bits plus a 38-bit special prime = 438 bits (the 128-bit bound of N = 16384) for up to 10 primes (iris: 9,
+	// wine / cancer / digits: 10 at depth 6); deeper trees shrink the primes to stay within the bound (not below 34 bits)
+	const int small_prime_bits = max(34, min(40, ((int) CoeffModulus::MaxBitCount(poly_modulus_degree_glb) - 38) / (oblivious_levels + 1)));
+	const int small_special_bits = 38, big_extra_bits = 40, big_special_bits = 50;
 	if (use_rs) {
 		// primes: [oblivious_levels + 1 shared] [eq_levels extra, only in the big ring] [special big] [special small]; all are
 		// = 1 mod 2 * N_big and therefore valid in both rings.  The data chain is the shared primes + its own special prime,
@@ -127,8 +163,8 @@ int main(int argc, char* argv[]) {
 			for (int i = 0; i <= oblivious_levels; i++) modulus_bits.push_back(prime_bits);   // base prime + one prime per level
 			modulus_bits.push_back(special_bits);
 		} else {
-			// original chain (plaintext partition criterion)
-			modulus_bits.assign(depth_glb < 6 ? 8 : 9, 34);
+			// original chain (plaintext partition criterion; also the chain of the selection from shares, which adds no level)
+			modulus_bits.assign(depth_glb < 6 ? 8 : 9, orig_prime_bits);
 		}
 		coeff_modulus = CoeffModulus::Create(poly_modulus_degree_glb, modulus_bits);
 	}
@@ -207,6 +243,11 @@ int main(int argc, char* argv[]) {
 		ksk_big_to_small = rsw::gen_key_switch_key(sk_big_coeffs, rsw::embed_sk(sk_small_coeffs), *seal_context_big, shared_level, p, 8, 0);
 	}
 
+	ObliviousMultiCtx oblivious_multi;
+	if (use_multi) omc_init(oblivious_multi, data_size_glb, attr_size_glb, value_size_glb, seal_context, evaluator, batch_encoder);
+	ShareSelCtx share_ctx;
+	if (share_update) ssc_init(share_ctx, data_size_glb, num_servers, share_tiled, p, batch_encoder);
+
 	// (the separate +-2^i key set that used to be generated here was never used; the oblivious expansion needs the negative
 	//  powers of two, which are now part of steps_rot)
 	GaloisKeys gal_keys_rot;
@@ -261,11 +302,17 @@ int main(int argc, char* argv[]) {
 	}
 
 
-	if (oblivious_update) {
+	if (use_multi) {
+		// aligning compact regions, stretch (baby / giant steps), fill, fold, chunk placement, tiling (all in oblivious_multi.h)
+		for (int s : omc_rotation_steps(oblivious_multi)) steps_rot.push_back(s);
+	} else if (oblivious_update) {
 		// fold/tile over the A*V blocks of P, copying P into the regions of the ciphertext, aligning regions (all in util.h)
 		for (int s : oblivious_update_rotation_steps(data_size_glb, attr_size_glb, value_size_glb, true)) {
 			steps_rot.push_back(s);
 		}
+	} else if (share_update) {
+		// moving a node's region to the front, both rows, tiling (share_select.h)
+		for (int s : ssc_rotation_steps(share_ctx)) steps_rot.push_back(s);
 	}
 
 	// remove duplicates: every Galois key is large (it grows quadratically with the length of the modulus chain)
@@ -287,11 +334,26 @@ int main(int argc, char* argv[]) {
 								   batch_encoder, encryptor);
 
 	cout << "Initial noise budget: " << decryptor.invariant_noise_budget(inputs_X[0]) << " bits\n";
+	if (sim_reuse && inputs_X.size() > 2) {
+		cout << "Simulated reuse: " << inputs_X.size() << " input ciphertexts, only 2 are preprocessed and stored.\n";
+		inputs_X.resize(2);   // (the legacy plaintext update reads ciphertext 1 of the partitions, so keep two)
+	}
 
 	const bool verify = argc > 5 && std::stoi(argv[5]);   // optional 5th argument: decrypt and check the selection vectors
 	vector<vector<int>> plain_x;
-	if (oblivious_update && verify) {
+	if (oblivious_update && verify && !use_multi) {
 		plain_x = obl_decode_dataset(inputs_X[0], decryptor, batch_encoder);
+	}
+	if (share_update) {
+		// the data whose shares the servers hold: decoded from the clients' one-hot ciphertext when it holds the whole dataset (iris),
+		// otherwise random data as in the multi-ciphertext layout (the preprocessing of the repo is a runtime simulation for these sizes)
+		if ((size_t) attr_size_glb * value_size_glb * data_size_glb <= poly_modulus_degree_glb / 2) {
+			plain_x = obl_decode_dataset(inputs_X[0], decryptor, batch_encoder);
+		} else {
+			plain_x.assign(data_size_glb, vector<int>(attr_size_glb));
+			mt19937 data_rng(7);
+			for (auto& row : plain_x) for (auto& v : row) v = data_rng() % value_size_glb;
+		}
 	}
 
 	// The oblivious update multiplies the selector (which sits `eq_levels_small` levels below the top after the equality test)
@@ -334,7 +396,49 @@ int main(int argc, char* argv[]) {
 	vector<vector<Ciphertext>> level_attr_ct(depth_glb), level_val_ct(depth_glb);   // [level][group]
 	vector<int> split_attr_pt(num_internal), split_val_pt(num_internal);
 
-	if (oblivious_update) {
+	if (use_multi) {
+		// The preprocessing of this repo is only a runtime simulation for these sizes (its one-hot encoding does not fit the layout), so
+		// the partitions P of the multi-ciphertext layout are encrypted directly from random plaintext data (stand-in for the output of a
+		// correct preprocessing); the splits below are verified against plaintext training on this data.
+		time_start = chrono::high_resolution_clock::now();
+		plain_x.assign(data_size_glb, vector<int>(attr_size_glb));
+		mt19937 data_rng(7);
+		for (auto& row : plain_x) for (auto& v : row) v = data_rng() % value_size_glb;
+		omc_encrypt_partitions(oblivious_multi, plain_x, seal_context, evaluator, batch_encoder, encryptor);
+		oblivious_ring_switch_init(oblivious_rs, *seal_context_big, *evaluator_big, relin_keys_big, ksk_big_to_small, oblivious_multi.eq_small);
+		time_end = chrono::high_resolution_clock::now();
+		cout << "Packing P time: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us. "
+			 << "chunk n'=" << oblivious_multi.nprime << " (" << oblivious_multi.J << " chunks), " << oblivious_multi.J * oblivious_multi.m_b
+			 << " ciphertexts of P, " << oblivious_multi.G << " nodes per compact ciphertext.\n";
+
+		vector<uint64_t> root_vec(poly_modulus_degree_glb, 1);
+		Plaintext root_pl;
+		batch_encoder.encode(root_vec, root_pl);
+		encryptor.encrypt(root_pl, selection_vector[0]);
+		// the first update (S_left = T, public root) is at chain index top - 3 (stretch, P, mask); the root is used up to there
+		int root_chain = (int) seal_context.first_context_data()->chain_index() - 3;
+		while ((int) seal_context.get_context_data(selection_vector[0].parms_id())->chain_index() > root_chain)
+			evaluator.mod_switch_to_next_inplace(selection_vector[0]);
+
+		mt19937 split_rng(2024);
+		for (int d = 0; d < depth_glb - 1; d++) {
+			int groups = ((1 << d) + oblivious_multi.G - 1) / oblivious_multi.G;
+			level_attr_ct[d].resize(groups);
+			level_val_ct[d].resize(groups);
+			for (int gi = 0; gi < groups; gi++) {
+				vector<int> attrs, vals;
+				for (int g = 0; g < oblivious_multi.G && gi * oblivious_multi.G + g < (1 << d); g++) {
+					int node = (1 << d) - 1 + gi * oblivious_multi.G + g;
+					split_attr_pt[node] = split_rng() % attr_size_glb;
+					split_val_pt[node] = 1 + split_rng() % (value_size_glb - 1);
+					attrs.push_back(split_attr_pt[node]);
+					vals.push_back(split_val_pt[node]);
+				}
+				level_attr_ct[d][gi] = omc_encrypt_group_big(oblivious_multi, attrs, batch_encoder, *encryptor_big, 2 * poly_modulus_degree_glb);
+				level_val_ct[d][gi] = omc_encrypt_group_big(oblivious_multi, vals, batch_encoder, *encryptor_big, 2 * poly_modulus_degree_glb);
+			}
+		}
+	} else if (oblivious_update) {
 		time_start = chrono::high_resolution_clock::now();
 		oblivious_ctx.equality_poly = equality_poly;
 		build_oblivious_sel_ctx(oblivious_ctx, preprocessed_partitions, seal_context, evaluator, batch_encoder, gal_keys_rot);
@@ -383,19 +487,30 @@ int main(int argc, char* argv[]) {
 				}
 			}
 		}
+	} else if (share_update) {
+		// root: every datapoint is selected (public); the splits stand in for the outputs of BestSplit, the servers encrypt their shares
+		// of the selection level by level in the training loop (after BestSplit of that level)
+		encryptor.encrypt(share_ctx.ones_pl, selection_vector[0]);
+		mt19937 split_rng(2024);
+		for (int node = 0; node < num_internal; node++) {
+			split_attr_pt[node] = split_rng() % attr_size_glb;
+			split_val_pt[node] = 1 + split_rng() % (value_size_glb - 1);
+		}
+		cout << "Selection from shares: " << share_ctx.M << " servers, " << (share_ctx.tiled ? "tiled, 1 node" : "packed, " + to_string(share_ctx.G) + " nodes")
+			 << " per share ciphertext\n";
 	} else {
 		// just fill in random selection vectors...
 		for (int i = 0; i < (int) selection_vector.size(); i++) {
 			encryptor.encrypt(pl_test, selection_vector[i]);
 		}
 	}
+	long long parallel_servers_us = 0;   // share encryptions of the other M - 1 servers (they run in parallel with the first one)
+	mt19937_64 share_rng(99);
 
 	// legacy (plaintext split) path only: ideally, different nodes should have different partition thresholds, but just for some simulation...
 	int threshold_attr_ind = 1, threshold_val_ind = 1;
 
 	vector<vector<vector<Ciphertext>>> partitions_for_node;
-	vector<vector<Ciphertext>> level_partitions;                            // copies of the preprocessed partitions at the current level
-	vector<vector<vector<Ciphertext>>> level_partitioned_labels;
 	vector<vector<vector<vector<Ciphertext>>>> partition_labels_for_node;
 
 	long www = 0;
@@ -415,7 +530,12 @@ int main(int argc, char* argv[]) {
 			int groups = (int) level_attr_ct[d].size();
 			level_threshold_data.resize(groups);
 			auto compute_group = [&](int gi) {
-				if (use_rs) {
+				if (use_multi) {
+					// compact one-hot over the blocks for the whole group, in the big ring, switched to the data ring
+					Ciphertext sel_big = oblivious_selector_poly(*seal_context_big, *evaluator_big, oblivious_rs.oc_big, relin_keys_big,
+																 level_attr_ct[d][gi], level_val_ct[d][gi]);
+					level_threshold_data[gi] = rsw::ring_switch(sel_big, ksk_big_to_small, *seal_context_big, seal_context);
+				} else if (use_rs) {
 					level_threshold_data[gi] = oblivious_group_threshold_data_rs(seal_context, evaluator, oblivious_ctx, relin_keys, gal_keys_rot,
 																				 oblivious_rs, level_attr_ct[d][gi], level_val_ct[d][gi]);
 				} else {
@@ -433,23 +553,55 @@ int main(int argc, char* argv[]) {
 			}
 		}
 
+		if (share_update && d != depth_glb - 1) {
+			// the selection of a node is used at the level of its parent's selection vector (the root's children: one level below the
+			// top); a packed share ciphertext is encrypted one level higher, for the mask of the extraction
+			parms_id_type use_level = d == 0 ? seal_context.first_context_data()->next_context_data()->parms_id()
+											 : selection_vector[(1 << d) - 1].parms_id();
+			parms_id_type enc_level = share_ctx.tiled ? use_level : seal_context.get_context_data(use_level)->prev_context_data()->parms_id();
+			int groups = ((1 << d) + share_ctx.G - 1) / share_ctx.G;
+			level_threshold_data.resize(groups);
+			double enc_before = share_ctx.enc_us, sum_before = share_ctx.sum_us;
+			long long cts_before = share_ctx.cts_per_server, bytes_before = share_ctx.bytes_per_server;
+			for (int gi = 0; gi < groups; gi++) {
+				vector<vector<int>> sels;
+				for (int g = 0; g < share_ctx.G && gi * share_ctx.G + g < (1 << d); g++) {
+					int node = (1 << d) - 1 + gi * share_ctx.G + g;
+					sels.push_back(ssc_plain_selection(plain_x, split_attr_pt[node], split_val_pt[node]));
+				}
+				level_threshold_data[gi] = ssc_encrypt_group(share_ctx, sels, enc_level, share_rng, batch_encoder, encryptor, evaluator);
+			}
+			double enc_level_us = share_ctx.enc_us - enc_before;
+			parallel_servers_us += (long long) (enc_level_us * (share_ctx.M - 1) / share_ctx.M);
+			cout << "		level " << d << ": " << share_ctx.cts_per_server - cts_before << " share ciphertext(s) per server, "
+				 << (share_ctx.bytes_per_server - bytes_before) / 1024 << " KiB, chain index " << seal_context.get_context_data(enc_level)->chain_index()
+				 << "; encryption " << (long long) (enc_level_us / share_ctx.M) / 1000.0 << " ms per server, aggregation of the "
+				 << share_ctx.M << " shares " << (long long) (share_ctx.sum_us - sum_before) / 1000.0 << " ms\n";
+		}
+
 		lvl_mid = chrono::high_resolution_clock::now();
 
 		// Every operation on the partitions below happens at the level of the selection vector anyway (the higher of the two
 		// ciphertexts is switched down), but the rotations of simulate_random_select_sqrt_attributes would run at the much higher
-		// level of the stored partitions, and each node would switch its own copies. Switch once per level instead.
+		// level of the stored partitions, and each node would switch its own copies. Switch the stored partitions once per level instead,
+		// IN PLACE: the level of the selection vectors never increases from one level of the tree to the next, so nothing needs the higher
+		// level again (the leaf labeling switches down to the selection vector's level as well).  A copy per level would double the memory
+		// of the partitions, which is gigabytes for digits.
 		if (level_switch) {
-			level_partitions = preprocessed_partitions;
-			level_partitioned_labels = preprocessed_partitioned_labels;
 			parms_id_type target = selection_vector[(1 << d) - 1].parms_id();
 			int target_chain = (int) seal_context.get_context_data(target)->chain_index();
-			for (auto& v : level_partitions) for (auto& ct : v)
-				if ((int) seal_context.get_context_data(ct.parms_id())->chain_index() > target_chain) evaluator.mod_switch_to_inplace(ct, target);
-			for (auto& v : level_partitioned_labels) for (auto& w : v) for (auto& ct : w)
-				if ((int) seal_context.get_context_data(ct.parms_id())->chain_index() > target_chain) evaluator.mod_switch_to_inplace(ct, target);
+			vector<Ciphertext*> stored;
+			for (auto& v : preprocessed_partitions) for (auto& ct : v) stored.push_back(&ct);
+			for (auto& v : preprocessed_partitioned_labels) for (auto& w : v) for (auto& ct : w) stored.push_back(&ct);
+			NTL::SetNumThreads(num_cores);
+			NTL_EXEC_RANGE((long) stored.size(), first, last);
+			for (long i = first; i < last; i++)
+				if ((int) seal_context.get_context_data(stored[i]->parms_id())->chain_index() > target_chain)
+					evaluator.mod_switch_to_inplace(*stored[i], target);
+			NTL_EXEC_RANGE_END;
 		}
-		vector<vector<Ciphertext>>& part_for_level = level_switch ? level_partitions : preprocessed_partitions;
-		vector<vector<vector<Ciphertext>>>& part_labels_for_level = level_switch ? level_partitioned_labels : preprocessed_partitioned_labels;
+		vector<vector<Ciphertext>>& part_for_level = preprocessed_partitions;
+		vector<vector<vector<Ciphertext>>>& part_labels_for_level = preprocessed_partitioned_labels;
 
 		partitions_for_node.resize(pow(2,d));
 		partition_labels_for_node.resize(pow(2,d));
@@ -470,23 +622,32 @@ int main(int argc, char* argv[]) {
 					int sel_ind = pow(2, d)-1 + nd;
 
 					vector<vector<Ciphertext>> random_preprocessed_partitions;
+					int logical_cts = 0;
 					vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
 					if (nd == 0) sss = chrono::high_resolution_clock::now();
 					simulate_random_select_sqrt_attributes(part_for_level, part_labels_for_level,
 															random_preprocessed_partitions, random_reprocessed_partitioned_labels,
-															seal_context, evaluator, gal_keys_rot, !multi_thread, dataset == 4);
+															seal_context, evaluator, gal_keys_rot, !multi_thread, dataset == 4, &logical_cts, sim_reuse);
 					if (nd == 0) {
 						eee = chrono::high_resolution_clock::now();
 						www += chrono::duration_cast<chrono::microseconds>(eee - sss).count();
 					}
 					perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
 												partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
-												relin_keys, gal_keys_rot, !multi_thread);
+												relin_keys, gal_keys_rot, !multi_thread, sim_reuse ? logical_cts : 0, sim_reuse);
 
 					if (d != depth_glb-1) {
-						if (oblivious_update) {
+						if (use_multi) {
+							Ciphertext threshold_data = omc_node_threshold_data(seal_context, evaluator, oblivious_multi, relin_keys, gal_keys_rot,
+																			level_threshold_data[nd / oblivious_multi.G], nd % oblivious_multi.G);
+							omc_apply_children(selection_vector, threshold_data, d, nd, oblivious_multi, seal_context, evaluator, relin_keys);
+						} else if (share_update) {
+							Ciphertext threshold_data = ssc_node_threshold_data(seal_context, evaluator, share_ctx, gal_keys_rot,
+																			   level_threshold_data[nd / share_ctx.G], nd % share_ctx.G);
+							ssc_apply_children(selection_vector, threshold_data, d, nd, share_ctx, evaluator, relin_keys);
+						} else if (oblivious_update) {
 							oblivious_apply_threshold_data(selection_vector, level_threshold_data[nd / oblivious_ctx.group_size], nd % oblivious_ctx.group_size,
-													  d, nd, oblivious_ctx, seal_context, evaluator, relin_keys, gal_keys_rot);
+																	  d, nd, oblivious_ctx, seal_context, evaluator, relin_keys, gal_keys_rot);
 						} else {
 							update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
 																		seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
@@ -501,22 +662,31 @@ int main(int argc, char* argv[]) {
 				int sel_ind = pow(2, d)-1 + nd;
 
 				vector<vector<Ciphertext>> random_preprocessed_partitions;
+				int logical_cts = 0;
 				vector<vector<vector<Ciphertext>>> random_reprocessed_partitioned_labels;
 				sss = chrono::high_resolution_clock::now();
 				simulate_random_select_sqrt_attributes(part_for_level, part_labels_for_level,
 													   random_preprocessed_partitions, random_reprocessed_partitioned_labels,
-													   seal_context, evaluator, gal_keys_rot, !multi_thread, dataset == 4);
+													   seal_context, evaluator, gal_keys_rot, !multi_thread, dataset == 4, &logical_cts, sim_reuse);
 				eee = chrono::high_resolution_clock::now();
 				www += chrono::duration_cast<chrono::microseconds>(eee - sss).count();
 
 				perform_partition_for_node(random_preprocessed_partitions, random_reprocessed_partitioned_labels, partitions_for_node[nd],
 										partition_labels_for_node[nd], seal_context, selection_vector[sel_ind], evaluator,
-										relin_keys, gal_keys_rot, !multi_thread);
+										relin_keys, gal_keys_rot, !multi_thread, sim_reuse ? logical_cts : 0, sim_reuse);
 
 				if (d != depth_glb-1) {
-					if (oblivious_update) {
+					if (use_multi) {
+						Ciphertext threshold_data = omc_node_threshold_data(seal_context, evaluator, oblivious_multi, relin_keys, gal_keys_rot,
+																		level_threshold_data[nd / oblivious_multi.G], nd % oblivious_multi.G);
+						omc_apply_children(selection_vector, threshold_data, d, nd, oblivious_multi, seal_context, evaluator, relin_keys);
+					} else if (share_update) {
+						Ciphertext threshold_data = ssc_node_threshold_data(seal_context, evaluator, share_ctx, gal_keys_rot,
+																		   level_threshold_data[nd / share_ctx.G], nd % share_ctx.G);
+						ssc_apply_children(selection_vector, threshold_data, d, nd, share_ctx, evaluator, relin_keys);
+					} else if (oblivious_update) {
 						oblivious_apply_threshold_data(selection_vector, level_threshold_data[nd / oblivious_ctx.group_size], nd % oblivious_ctx.group_size,
-													  d, nd, oblivious_ctx, seal_context, evaluator, relin_keys, gal_keys_rot);
+																  d, nd, oblivious_ctx, seal_context, evaluator, relin_keys, gal_keys_rot);
 					} else {
 						update_selection_vector(selection_vector, preprocessed_partitions, threshold_attr_ind, threshold_val_ind, d, nd,
 																	seal_context, batch_encoder, evaluator, relin_keys, gal_keys_rot);
@@ -531,9 +701,22 @@ int main(int argc, char* argv[]) {
 	}
 
 	if (oblivious_update && verify) {
-		int wrong = verify_oblivious_selection_vectors(selection_vector, split_attr_pt, split_val_pt, plain_x, depth_glb,
-													   decryptor, batch_encoder, seal_context);
+		int wrong = use_multi ? omc_verify_selection_vectors(selection_vector, split_attr_pt, split_val_pt, plain_x, depth_glb,
+															 decryptor, batch_encoder, oblivious_multi)
+							  : verify_oblivious_selection_vectors(selection_vector, split_attr_pt, split_val_pt, plain_x, depth_glb,
+																   decryptor, batch_encoder, seal_context);
 		cout << "Verification of all selection vectors against plaintext training: " << (wrong ? "FAILED, wrong slots: " + to_string(wrong) : string("OK")) << endl;
+	}
+	if (share_update) {
+		cout << "Share ciphertexts per server: " << share_ctx.cts_per_server << ", " << share_ctx.bytes_per_server / 1024 << " KiB (uncompressed); encryption "
+			 << share_ctx.enc_us / share_ctx.M / 1000.0 << " ms per server, aggregation " << share_ctx.sum_us / 1000.0 << " ms\n";
+		if (verify) {
+			int min_budget = 0;
+			int wrong = ssc_verify_selection_vectors(selection_vector, split_attr_pt, split_val_pt, plain_x, depth_glb,
+													 decryptor, batch_encoder, share_ctx, &min_budget);
+			cout << "Verification of all selection vectors against plaintext training: " << (wrong ? "FAILED, wrong slots: " + to_string(wrong) : string("OK"))
+				 << " (lowest noise budget " << min_budget << " bits)" << endl;
+		}
 	}
 
 	// simulate the labeling for leaf nodes for multi-threading...
@@ -594,7 +777,13 @@ int main(int argc, char* argv[]) {
 	}
 
 	time_end = chrono::high_resolution_clock::now();
-	cout << "Training + labeling + packing total runtime: " << chrono::duration_cast<chrono::microseconds>(time_end - time_start).count() << " us.\n";
+	long long total_us = chrono::duration_cast<chrono::microseconds>(time_end - time_start).count();
+	if (share_update) {
+		// the M servers encrypt their shares in parallel: count the encryption of one server
+		cout << "	(one machine, the share encryptions of all " << share_ctx.M << " servers in sequence: " << total_us << " us)\n";
+		total_us -= parallel_servers_us;
+	}
+	cout << "Training + labeling + packing total runtime: " << total_us << " us.\n";
 
 
 
